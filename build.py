@@ -4,7 +4,7 @@ import subprocess
 # CONFIG
 exe_name = "win32_game.exe"
 defines = {"ENGINE_SLOW": "1", "ENGINE_INTERNAL": "1"}
-compiler_flags = ["-g", "-fdiagnostics-absolute-paths"]
+compiler_flags = ["-g", "-fdiagnostics-absolute-paths", "-Wall"]
 syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib"]
 
 # FILES
@@ -36,9 +36,11 @@ compile_cmd = f"clang \
 "
 
 result = subprocess.run(compile_cmd, shell=True, capture_output=True, text=True)
-if len(result.stdout) > 0:
-    print("BUILD ERROR")
-    print("")
+
+if len(result.stderr) > 0:
+    # CLANG ERRORS
+    print(result.stderr.strip())
+    # WINDOWS LINKER ERRORS
     print(result.stdout.strip())
     exit(-1)
 else:

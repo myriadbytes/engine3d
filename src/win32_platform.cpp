@@ -2,6 +2,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
+#include <strsafe.h>
 
 #include "common.h"
 
@@ -53,6 +54,7 @@ D3D12Context initD3D12(HWND window_handle) {
     for (u32 i = 0; i < adapters_count; i++) {
         DXGI_ADAPTER_DESC1 desc;
         HRESULT desc_res = adapters[i]->GetDesc1(&desc);
+        ASSERT(SUCCEEDED(desc_res));
 
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
@@ -134,6 +136,49 @@ D3D12Context initD3D12(HWND window_handle) {
     return context;
 }
 
+struct TimingInfo {
+    i64 timestamp;
+    i64 timestamp_frequency;
+
+    f32 last_frame_to_frame_seconds;
+};
+
+TimingInfo initTimingInfo() {
+    TimingInfo result = {};
+
+    LARGE_INTEGER ctr;
+    LARGE_INTEGER freq;
+    QueryPerformanceCounter(&ctr);
+    QueryPerformanceFrequency(&freq);
+
+    result.timestamp = ctr.QuadPart;
+    result.timestamp_frequency = freq.QuadPart;
+
+    return result;
+}
+
+void measureTimingInfo(TimingInfo* info) {
+    i64 last = info->timestamp;
+    i64 now;
+
+    LARGE_INTEGER ctr;
+    QueryPerformanceCounter(&ctr);
+    now = ctr.QuadPart;
+
+    info->timestamp = now;
+
+    i64 frame_to_frame_cycles = now - last;
+    info->last_frame_to_frame_seconds = frame_to_frame_cycles / (f32)info->timestamp_frequency;
+}
+
+void printTimingInfo(TimingInfo* info) {
+    // TODO: write my own logging / formatting subsystem
+    char print_buffer[256];
+    StringCchPrintfA(print_buffer, ARRAY_COUNT(print_buffer), "Frame-to-frame: %.02f (ms)\n", info->last_frame_to_frame_seconds * 1000.f);
+
+    OutputDebugStringA(print_buffer);
+}
+
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
 // for now is to apply default behavior and call PostQuitMessage in case of WM_DESTROY
 // event. This allows a blocking GetMessage loop to exit gracefully instead of keeping
@@ -179,8 +224,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     global_running = true;
 
     D3D12Context d3d_context = initD3D12(window);
+    TimingInfo timing_info = initTimingInfo();
 
     while (global_running) {
+
+        // NOTE: measure and print the time the previous frame took
+        measureTimingInfo(&timing_info);
+        printTimingInfo(&timing_info);
 
         MSG msg;
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE))
@@ -224,7 +274,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         render_target_view.ptr = d3d_context.rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context.rtv_descriptor_size * d3d_context.current_frame_idx;
 
         // NOTE: clear and render
-        f32 clear_color[4] = {0.1, 1.0, 0.5, 1.0};
+        f32 clear_color[8] = {1, 0, 0, 1};
         current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
 
         // NOTE: the backbuffer will now be prepared to be used for presentation
