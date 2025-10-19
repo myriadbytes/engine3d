@@ -21,3 +21,15 @@ typedef int8_t b8;
 typedef int32_t b32;
 
 #define PI32 3.14159265359f
+
+#define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
+
+#if ENGINE_SLOW
+    #define ASSERT(expr)\
+        if (!(expr)) {\
+            volatile u8* ptr = (u8*)(0);\
+            *ptr = 0;\
+        }
+#else
+    #define ASSERT(expr) {}
+#endif

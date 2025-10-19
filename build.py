@@ -40,5 +40,7 @@ if len(result.stdout) > 0:
     print("BUILD ERROR")
     print("")
     print(result.stdout.strip())
+    exit(-1)
 else:
     print("BUILD SUCCESS")
+    exit(0)
