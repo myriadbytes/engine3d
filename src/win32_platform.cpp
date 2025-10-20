@@ -269,6 +269,7 @@ void printReading(IGameInputDevice* device, IGameInputReading* reading) {
 
 void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_input_state, InputState* current_input_state) {
 
+    // NOTE: clear the current input state since we are polling the whole state every frame
     *current_input_state = {};
 
     IGameInputReading* kb_reading;
@@ -276,6 +277,21 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
 
     if (SUCCEEDED(kb_reading_res)) {
         current_input_state->is_analog = false;
+
+        // NOTE: up to 16 different keys pressed at the same time
+        // most keyboards upport fewer simultaneous presses than that
+        GameInputKeyState key_states[16];
+        u32 key_states_count = kb_reading->GetKeyCount();
+        ASSERT(key_states_count < ARRAY_COUNT(key_states));
+        kb_reading->GetKeyState(key_states_count, key_states);
+
+        for (u32 i = 0; i < key_states_count; i++) {
+            GameInputKeyState key = key_states[i];
+
+            ASSERT(key.scanCode < SCANCODE_COUNT);
+            current_input_state->kb.keys[key.scanCode].is_down = true;
+            current_input_state->kb.keys[key.scanCode].transitions = (current_input_state->kb.keys[key.scanCode].is_down != previous_input_state->kb.keys[key.scanCode].is_down);
+        }
 
         kb_reading->Release();
     }
@@ -303,7 +319,7 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
         //    rel_mouse_x, rel_mouse_y);
         //OutputDebugStringA(print_buffer);
 
-        current_input_state->kb.MouseScreenPos = Vec2 {rel_mouse_x, rel_mouse_y};
+        current_input_state->kb.mouse_screen_pos = Vec2 {rel_mouse_x, rel_mouse_y};
 
         mouse_reading->Release();
     }
@@ -312,14 +328,36 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
     HRESULT pad_reading_res = game_input->GetCurrentReading(GameInputKindGamepad, nullptr, &pad_reading);
 
     if (SUCCEEDED(pad_reading_res)) {
+        // TODO: this is not enough to tell if the input should be analog or keyboard
+        // since we have a reading every frame when a controller is plugged in no matter if the user actually touched his controller or not
+        // so the current behavior is that the input is considered analog if there is a gamepad connected
+        // this could be fixed by using the event-driven GameInput API? or doing a diff with polling
         current_input_state->is_analog = true;
 
         GameInputGamepadState pad_state;
         pad_reading->GetGamepadState(&pad_state);
 
+        current_input_state->ctrl.a.is_down = (pad_state.buttons & GameInputGamepadA) == GameInputGamepadA;
+        current_input_state->ctrl.a.transitions = (current_input_state->ctrl.a.is_down != previous_input_state->ctrl.a.is_down);
+
+        current_input_state->ctrl.b.is_down = (pad_state.buttons & GameInputGamepadB) == GameInputGamepadB;
+        current_input_state->ctrl.b.transitions = (current_input_state->ctrl.b.is_down != previous_input_state->ctrl.b.is_down);
+
+        current_input_state->ctrl.x.is_down = (pad_state.buttons & GameInputGamepadX) == GameInputGamepadX;
+        current_input_state->ctrl.x.transitions = (current_input_state->ctrl.x.is_down != previous_input_state->ctrl.x.is_down);
+
+        current_input_state->ctrl.y.is_down = (pad_state.buttons & GameInputGamepadY) == GameInputGamepadY;
+        current_input_state->ctrl.y.transitions = (current_input_state->ctrl.y.is_down != previous_input_state->ctrl.y.is_down);
+
+        current_input_state->ctrl.lb.is_down = (pad_state.buttons & GameInputGamepadRightShoulder) == GameInputGamepadRightShoulder;
+        current_input_state->ctrl.lb.transitions = (current_input_state->ctrl.lb.is_down != previous_input_state->ctrl.lb.is_down);
+
+        current_input_state->ctrl.rb.is_down = (pad_state.buttons & GameInputGamepadLeftShoulder) == GameInputGamepadLeftShoulder;
+        current_input_state->ctrl.rb.transitions = (current_input_state->ctrl.rb.is_down != previous_input_state->ctrl.rb.is_down);
+
         // TODO: deadzone handling
-        current_input_state->ctrl.leftStick = Vec2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
-        current_input_state->ctrl.rightStick = Vec2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+        current_input_state->ctrl.left_stick = Vec2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
+        current_input_state->ctrl.right_stick = Vec2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
 
         pad_reading->Release();
     }
@@ -411,8 +449,28 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
 
-        f32 clear_color[8] = {current_input_state->kb.MouseScreenPos.x, current_input_state->kb.MouseScreenPos.y, 0.0, 1};
-        renderFrame(&d3d_context, current_frame, clear_color);
+        f32 digital_color[4] = {current_input_state->kb.mouse_screen_pos.x, current_input_state->kb.mouse_screen_pos.y, 0.0, 1};
+        f32 analog_color[4] = {current_input_state->ctrl.right_stick.x,current_input_state->ctrl.right_stick.y, 0.0, 1};
+        renderFrame(&d3d_context, current_frame, current_input_state->is_analog ? analog_color : digital_color);
+
+        if (current_input_state->ctrl.a.is_down && current_input_state->ctrl.a.transitions == 1) {
+            OutputDebugStringA("A pressed!\n");
+        }
+        if (current_input_state->ctrl.b.is_down && current_input_state->ctrl.b.transitions == 1) {
+            OutputDebugStringA("B pressed!\n");
+        }
+        if (current_input_state->ctrl.x.is_down && current_input_state->ctrl.x.transitions == 1) {
+            OutputDebugStringA("X pressed!\n");
+        }
+        if (current_input_state->ctrl.y.is_down && current_input_state->ctrl.y.transitions == 1) {
+            OutputDebugStringA("Y pressed!\n");
+        }
+        if (current_input_state->ctrl.lb.is_down && current_input_state->ctrl.lb.transitions == 1) {
+            OutputDebugStringA("LB pressed!\n");
+        }
+        if (current_input_state->ctrl.rb.is_down && current_input_state->ctrl.rb.transitions == 1) {
+            OutputDebugStringA("RB pressed!\n");
+        }
 
         // NOTE: Swap the user input buffers
         InputState* tmp = current_input_state;
