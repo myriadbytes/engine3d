@@ -3,8 +3,26 @@
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
 #include <strsafe.h>
+#include "Microsoft/include/GameInput.h"
+
+using namespace GameInput::v3;
 
 #include "common.h"
+#include "input.h"
+
+/*
+ * TO-DO LIST:
+ * - Swapchain resizing
+ * - Keyboard & controller input processing (either using raw WM_KEYDOWN & XInput or the "new" Windows GameInput)
+ * - Sound output (WASAPI ?)
+ * - Code hot-reloading
+ * - Save states (like an emulator)
+ * - Looped input recording & playback
+ * - Fully featured matrix math library
+ * - High level retro 3D artstyle renderer API
+ * - Logging
+ * - UI & Text Rendering
+ */
 
 b32 global_running = false;
 
@@ -136,6 +154,56 @@ D3D12Context initD3D12(HWND window_handle) {
     return context;
 }
 
+void renderFrame(D3D12Context* d3d_context, D3D12FrameContext* current_frame, f32* clear_color) {
+    // NOTE: reset the frame's command allocator and list, now that they are no
+    // longer in use
+    HRESULT alloc_reset = current_frame->command_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
+
+    // indicate that the backbuffer needs to be available as a render target
+    D3D12_RESOURCE_BARRIER render_barrier = {};
+    render_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    render_barrier.Transition.pResource = d3d_context->render_target_resources[d3d_context->current_frame_idx];
+    render_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    render_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    current_frame->command_list->ResourceBarrier(1, &render_barrier);
+
+    // NOTE: get the descriptor for backbuffer clearing
+    // TODO: maybe put that in the frame context directly ?
+    D3D12_CPU_DESCRIPTOR_HANDLE render_target_view;
+    render_target_view.ptr = d3d_context->rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context->rtv_descriptor_size * d3d_context->current_frame_idx;
+
+    // NOTE: clear and render
+    current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
+
+    // NOTE: the backbuffer will now be prepared to be used for presentation
+    D3D12_RESOURCE_BARRIER present_barrier = {};
+    present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    present_barrier.Transition.pResource = d3d_context->render_target_resources[d3d_context->current_frame_idx];
+    present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    present_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    current_frame->command_list->ResourceBarrier(1, &present_barrier);
+
+    // NOTE: close the command list and send it to the GPU for execution
+    HRESULT close_res = current_frame->command_list->Close();
+    ASSERT(SUCCEEDED(close_res));
+    d3d_context->command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&current_frame->command_list);
+
+    // TODO: sort the whole vsync situation
+    d3d_context->swapchain->Present(1, 0);
+
+    // NOTE: signal this frame's fence when the commands enqueued until now have completed
+    d3d_context->command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
+
+    // NOTE: get the next frame's index
+    // TODO: confirm that this is updated by the call to Present
+    d3d_context->current_frame_idx = d3d_context->swapchain->GetCurrentBackBufferIndex();
+}
+
 struct TimingInfo {
     i64 timestamp;
     i64 timestamp_frequency;
@@ -174,9 +242,87 @@ void measureTimingInfo(TimingInfo* info) {
 void printTimingInfo(TimingInfo* info) {
     // TODO: write my own logging / formatting subsystem
     char print_buffer[256];
-    StringCchPrintfA(print_buffer, ARRAY_COUNT(print_buffer), "Frame-to-frame: %.02f (ms)\n", info->last_frame_to_frame_seconds * 1000.f);
+    StringCbPrintfA(print_buffer, ARRAY_COUNT(print_buffer), "Frame-to-frame: %.02f (ms)\n", info->last_frame_to_frame_seconds * 1000.f);
 
     OutputDebugStringA(print_buffer);
+}
+
+void printReading(IGameInputDevice* device, IGameInputReading* reading) {
+    // TODO: handle other readings than keyboard
+    GameInputKeyState states[16];
+    u32 count = reading->GetKeyCount();
+    ASSERT(count < ARRAY_COUNT(states));
+    reading->GetKeyState(count, states);
+
+    //const GameInputDeviceInfo* info;
+    //device->GetDeviceInfo(&info);
+    //char dev_print_buffer[256];
+    //StringCbPrintfA(dev_print_buffer, 256, "Device: %s\n", info->displayName);
+    //OutputDebugStringA(dev_print_buffer);
+
+    for (u32 i = 0; i < count; i++) {
+        //char key_print_buffer[256];
+        //StringCbPrintfA(key_print_buffer, 256, "Virtual Key: %c\n", states[i].virtualKey);
+        //OutputDebugStringA(key_print_buffer);
+    }
+}
+
+void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_input_state, InputState* current_input_state) {
+
+    *current_input_state = {};
+
+    IGameInputReading* kb_reading;
+    HRESULT kb_reading_res = game_input->GetCurrentReading(GameInputKindKeyboard, nullptr, &kb_reading);
+
+    if (SUCCEEDED(kb_reading_res)) {
+        current_input_state->is_analog = false;
+
+        kb_reading->Release();
+    }
+
+    IGameInputReading* mouse_reading;
+    HRESULT mouse_reading_res = game_input->GetCurrentReading(GameInputKindMouse, nullptr, &mouse_reading);
+
+    if (SUCCEEDED(mouse_reading_res)) {
+        current_input_state->is_analog = false;
+
+        GameInputMouseState mouse_state;
+        mouse_reading->GetMouseState(&mouse_state);
+
+        // NOTE: normalized mouse coordinates relative to the window
+        // (0, 0) -> top left
+        // (1, 1) -> bottom right
+        // TODO: should this be clamped ?
+        RECT window_rect;
+        GetWindowRect(window, &window_rect);
+        f32 rel_mouse_x = (f32)(mouse_state.absolutePositionX - window_rect.left) / (f32) (window_rect.right - window_rect.left);
+        f32 rel_mouse_y = (f32)(mouse_state.absolutePositionY - window_rect.top) / (f32) (window_rect.bottom - window_rect.top);
+
+        //char print_buffer[256];
+        //StringCbPrintfA(print_buffer, 256, "MouseX: %.02f, MouseY: %.02f\n",
+        //    rel_mouse_x, rel_mouse_y);
+        //OutputDebugStringA(print_buffer);
+
+        current_input_state->kb.MouseScreenPos = Vec2 {rel_mouse_x, rel_mouse_y};
+
+        mouse_reading->Release();
+    }
+
+    IGameInputReading* pad_reading;
+    HRESULT pad_reading_res = game_input->GetCurrentReading(GameInputKindGamepad, nullptr, &pad_reading);
+
+    if (SUCCEEDED(pad_reading_res)) {
+        current_input_state->is_analog = true;
+
+        GameInputGamepadState pad_state;
+        pad_reading->GetGamepadState(&pad_state);
+
+        // TODO: deadzone handling
+        current_input_state->ctrl.leftStick = Vec2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
+        current_input_state->ctrl.rightStick = Vec2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+
+        pad_reading->Release();
+    }
 }
 
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
@@ -226,11 +372,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     D3D12Context d3d_context = initD3D12(window);
     TimingInfo timing_info = initTimingInfo();
 
+    // NOTE: game input double-buffering
+    // i think casey does this to prepare for asynchronous event
+    // collection in a separate thread
+    InputState input_states[2] = {};
+    InputState* current_input_state = &input_states[0];
+    InputState* previous_input_state = &input_states[1];
+
+    IGameInput* microsoft_game_input_interface;
+    HRESULT ginput_create_res = GameInputCreate(&microsoft_game_input_interface);
+    ASSERT(SUCCEEDED(ginput_create_res));
+
     while (global_running) {
 
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
-        printTimingInfo(&timing_info);
+        //printTimingInfo(&timing_info);
 
         MSG msg;
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE))
@@ -243,6 +400,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             DispatchMessage(&msg);
         }
 
+        pollGameInput(window, microsoft_game_input_interface, previous_input_state, current_input_state);
+
         // NOTE: wait for the backbuffer to be ready, by sleeping until its value
         // gets updated by the signal command we enqueued last time we rendered
         // to that framebuffer
@@ -252,54 +411,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
 
-        // NOTE: reset the frame's command allocator and list, now that they are no
-        // longer in use
-        HRESULT alloc_reset = current_frame->command_allocator->Reset();
-        ASSERT(SUCCEEDED(alloc_reset));
-        HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
-        ASSERT(SUCCEEDED(cmd_reset));
+        f32 clear_color[8] = {current_input_state->kb.MouseScreenPos.x, current_input_state->kb.MouseScreenPos.y, 0.0, 1};
+        renderFrame(&d3d_context, current_frame, clear_color);
 
-        // indicate that the backbuffer needs to be available as a render target
-        D3D12_RESOURCE_BARRIER render_barrier = {};
-        render_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        render_barrier.Transition.pResource = d3d_context.render_target_resources[d3d_context.current_frame_idx];
-        render_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        render_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        current_frame->command_list->ResourceBarrier(1, &render_barrier);
-
-        // NOTE: get the descriptor for backbuffer clearing
-        // TODO: maybe put that in the frame context directly ?
-        D3D12_CPU_DESCRIPTOR_HANDLE render_target_view;
-        render_target_view.ptr = d3d_context.rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context.rtv_descriptor_size * d3d_context.current_frame_idx;
-
-        // NOTE: clear and render
-        f32 clear_color[8] = {1, 0, 0, 1};
-        current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
-
-        // NOTE: the backbuffer will now be prepared to be used for presentation
-        D3D12_RESOURCE_BARRIER present_barrier = {};
-        present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        present_barrier.Transition.pResource = d3d_context.render_target_resources[d3d_context.current_frame_idx];
-        present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        present_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        current_frame->command_list->ResourceBarrier(1, &present_barrier);
-
-        // NOTE: close the command list and send it to the GPU for execution
-        HRESULT close_res = current_frame->command_list->Close();
-        ASSERT(SUCCEEDED(close_res));
-        d3d_context.command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&current_frame->command_list);
-
-        // TODO: sort the whole vsync situation
-        d3d_context.swapchain->Present(1, 0);
-
-        // NOTE: signal this frame's fence when the commands enqueued until now have completed
-        d3d_context.command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
-
-        // NOTE: get the next frame's index
-        // TODO: confirm that this is updated by the call to Present
-        d3d_context.current_frame_idx = d3d_context.swapchain->GetCurrentBackBufferIndex();
+        // NOTE: Swap the user input buffers
+        InputState* tmp = current_input_state;
+        current_input_state = previous_input_state;
+        previous_input_state = tmp;
     }
 
     return 0;
