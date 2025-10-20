@@ -49,8 +49,8 @@ enum Scancode {
 };
 
 struct ButtonState {
-    b32 is_down;
-    u32 transitions;
+    b8 is_down;
+    u8 transitions;
 };
 
 // NOTE: The keys array is indexed by scancodes because i feel like

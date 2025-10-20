@@ -9,19 +9,23 @@ using namespace GameInput::v3;
 
 #include "common.h"
 #include "input.h"
+#include "game_api.h"
 
 /*
  * TO-DO LIST:
  * - Swapchain resizing
- * - Keyboard & controller input processing (either using raw WM_KEYDOWN & XInput or the "new" Windows GameInput)
  * - Sound output (WASAPI ?)
- * - Code hot-reloading
  * - Save states (like an emulator)
  * - Looped input recording & playback
  * - Fully featured matrix math library
  * - High level retro 3D artstyle renderer API
  * - Logging
  * - UI & Text Rendering
+ * - Thread pool ?? For async asset streaming
+ *
+ * PROTOTYPED :
+ * - Code hot-reloading
+ * - Keyboard & controller input processing (using the "new" Windows GameInput)
  */
 
 b32 global_running = false;
@@ -247,26 +251,6 @@ void printTimingInfo(TimingInfo* info) {
     OutputDebugStringA(print_buffer);
 }
 
-void printReading(IGameInputDevice* device, IGameInputReading* reading) {
-    // TODO: handle other readings than keyboard
-    GameInputKeyState states[16];
-    u32 count = reading->GetKeyCount();
-    ASSERT(count < ARRAY_COUNT(states));
-    reading->GetKeyState(count, states);
-
-    //const GameInputDeviceInfo* info;
-    //device->GetDeviceInfo(&info);
-    //char dev_print_buffer[256];
-    //StringCbPrintfA(dev_print_buffer, 256, "Device: %s\n", info->displayName);
-    //OutputDebugStringA(dev_print_buffer);
-
-    for (u32 i = 0; i < count; i++) {
-        //char key_print_buffer[256];
-        //StringCbPrintfA(key_print_buffer, 256, "Virtual Key: %c\n", states[i].virtualKey);
-        //OutputDebugStringA(key_print_buffer);
-    }
-}
-
 void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_input_state, InputState* current_input_state) {
 
     // NOTE: clear the current input state since we are polling the whole state every frame
@@ -363,6 +347,51 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
     }
 }
 
+typedef decltype(&gameUpdate) GameUpdatePtr;
+
+struct GameCode {
+    bool is_valid;
+    HMODULE dll_handle;
+    FILETIME write_time;
+
+    GameUpdatePtr game_update;
+};
+
+FILETIME getFileLastWriteTime(const char* filename) {
+    // TODO: how to handle failure ?
+    WIN32_FILE_ATTRIBUTE_DATA file_data = {};
+    GetFileAttributesExA(filename, GetFileExInfoStandard, &file_data);
+    return file_data.ftLastWriteTime;
+}
+
+void loadGameCode(GameCode* game_code, const char* src_dll_name) {
+    *game_code = {};
+    game_code->write_time = getFileLastWriteTime(src_dll_name);
+
+    const char* tmp_dll_name = "game_tmp.dll";
+    CopyFile(src_dll_name, tmp_dll_name, false);
+
+    game_code->dll_handle = LoadLibraryA(tmp_dll_name);
+
+    if (game_code->dll_handle) {
+        game_code->game_update = (GameUpdatePtr)GetProcAddress(game_code->dll_handle, "gameUpdate");
+        if (game_code->game_update != NULL) {
+            game_code->is_valid = true;
+        } else {
+            game_code->is_valid = false;
+        }
+    } else {
+        game_code->is_valid = false;
+    }
+}
+
+void unloadGameCode(GameCode* game_code) {
+    if (game_code->dll_handle) {
+        FreeLibrary(game_code->dll_handle);
+    }
+    *game_code = {};
+}
+
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
 // for now is to apply default behavior and call PostQuitMessage in case of WM_DESTROY
 // event. This allows a blocking GetMessage loop to exit gracefully instead of keeping
@@ -409,6 +438,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     D3D12Context d3d_context = initD3D12(window);
     TimingInfo timing_info = initTimingInfo();
+    GameMemory game_memory = {};
+    game_memory.permanent_storage_size = MEGABYTES(64);
+    game_memory.permanent_storage = VirtualAlloc((void*)TERABYTES(2), game_memory.permanent_storage_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    GameCode game_code = {};
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -426,6 +460,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
         //printTimingInfo(&timing_info);
+
+        // NOTE: reload game code
+        const char* dll_name = "game.dll";
+        FILETIME dll_time = getFileLastWriteTime(dll_name);
+        if (CompareFileTime(&dll_time, &game_code.write_time) != 0) {
+            unloadGameCode(&game_code);
+            loadGameCode(&game_code, dll_name);
+        }
 
         MSG msg;
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE))
@@ -449,28 +491,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
 
-        f32 digital_color[4] = {current_input_state->kb.mouse_screen_pos.x, current_input_state->kb.mouse_screen_pos.y, 0.0, 1};
-        f32 analog_color[4] = {current_input_state->ctrl.right_stick.x,current_input_state->ctrl.right_stick.y, 0.0, 1};
-        renderFrame(&d3d_context, current_frame, current_input_state->is_analog ? analog_color : digital_color);
-
-        if (current_input_state->ctrl.a.is_down && current_input_state->ctrl.a.transitions == 1) {
-            OutputDebugStringA("A pressed!\n");
+        f32 fallback_color[] = {0.9, 0.7, 0.3, 1.0};
+        f32* clear_color = fallback_color;
+        if (game_code.is_valid) {
+            // TODO: compute the actual dt
+            clear_color = game_code.game_update(1.f/60.f, &game_memory, current_input_state);
         }
-        if (current_input_state->ctrl.b.is_down && current_input_state->ctrl.b.transitions == 1) {
-            OutputDebugStringA("B pressed!\n");
-        }
-        if (current_input_state->ctrl.x.is_down && current_input_state->ctrl.x.transitions == 1) {
-            OutputDebugStringA("X pressed!\n");
-        }
-        if (current_input_state->ctrl.y.is_down && current_input_state->ctrl.y.transitions == 1) {
-            OutputDebugStringA("Y pressed!\n");
-        }
-        if (current_input_state->ctrl.lb.is_down && current_input_state->ctrl.lb.transitions == 1) {
-            OutputDebugStringA("LB pressed!\n");
-        }
-        if (current_input_state->ctrl.rb.is_down && current_input_state->ctrl.rb.transitions == 1) {
-            OutputDebugStringA("RB pressed!\n");
-        }
+        renderFrame(&d3d_context, current_frame, clear_color);
 
         // NOTE: Swap the user input buffers
         InputState* tmp = current_input_state;
