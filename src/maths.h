@@ -261,3 +261,23 @@ inline m4 makeTranslation(f32 x, f32 y, f32 z) {
           x,   y,   z, 1.f,
     };
 }
+
+inline m4 makeTranslation(v3 a) {
+    return makeTranslation(a.x, a.y, a.z);
+}
+
+inline m4 makeScale(f32 x, f32 y, f32 z) {
+    return m4 {
+          x, 0.f, 0.f, 0.f,
+        0.f,   y, 0.f, 0.f,
+        0.f, 0.f,   z, 0.f,
+        0.f, 0.f, 0.f, 1.f,
+    };
+}
+
+inline m4 makeScale(v3 a) {
+    return makeScale(a.x, a.y, a.z);
+}
+
+m4 lookAt(v3 eye, v3 target);
+m4 makeProjection(f32 near, f32 far, f32 fov);

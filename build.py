@@ -14,6 +14,7 @@ game_dll_exports = ["gameUpdate"]
 # FILES
 platform_source_files = ["src/win32_platform.cpp"]
 game_source_files = ["src/game.cpp"]
+common_source_files = ["src/arena.cpp", "src/maths.cpp"]
 
 lib_directories = ["firstparty/Microsoft/lib/x64"]
 assets_directories = ["shaders"]
@@ -32,6 +33,9 @@ for asset_dir in assets_directories:
 defines_str = " ".join([f"-D{name}={value}" for (name, value) in defines.items()])
 compiler_flags_str = " ".join(compiler_flags)
 linker_flags_str = " ".join(linker_flags)
+common_sources_str = " ".join(
+    [str(project_dir / source) for source in common_source_files]
+)
 
 # PLATFORM EXE
 platform_sources_str = " ".join(
@@ -47,6 +51,7 @@ platform_compile_cmd = f"clang \
 {defines_str} \
 {compiler_flags_str} \
 {platform_sources_str} \
+{common_sources_str} \
 {platform_output_str} \
 {linker_flags_str} \
 {libs_directories_str} \
@@ -77,6 +82,7 @@ game_compile_cmd = f"clang \
 {defines_str} \
 {compiler_flags_str} \
 {game_sources_str} \
+{common_sources_str} \
 {game_output_str} \
 -shared \
 {linker_flags_str} \
@@ -96,7 +102,7 @@ if len(game_result.stderr) > 0:
     # WINDOWS LINKER ERRORS
     print(game_result.stdout.strip())
 
-# OUTPUT
+    # OUTPUT
 if platform_success and game_success:
     print("BUILD SUCCESS")
     exit(0)

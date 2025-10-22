@@ -20,6 +20,8 @@ typedef double f64;
 typedef int8_t b8;
 typedef int32_t b32;
 
+#define global static
+
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
 
 #if ENGINE_SLOW

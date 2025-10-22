@@ -16,25 +16,10 @@ using namespace GameInput::v3;
 #include "common.h"
 #include "input.h"
 #include "game_api.h"
+#include "arena.h"
 
-/*
- * TO-DO LIST:
- * - Swapchain resizing
- * - Sound output (WASAPI ?)
- * - Save states (like an emulator)
- * - Looped input recording & playback
- * - Fully featured matrix math library
- * - High level retro 3D artstyle renderer API
- * - Logging
- * - UI & Text Rendering
- * - Thread pool ?? For async asset streaming
- *
- * PROTOTYPED :
- * - Code hot-reloading
- * - Keyboard & controller input processing (using the "new" Windows GameInput)
- */
-
-b32 global_running = false;
+global b32 global_running = false;
+global Arena global_draw_orders_arena = {};
 
 struct D3D12FrameContext {
     ID3D12CommandAllocator* command_allocator;
@@ -66,6 +51,8 @@ struct D3D12VertexBuffer {
     D3D12_VERTEX_BUFFER_VIEW view;
     u32 count;
 };
+
+global D3D12VertexBuffer global_cube_vertex_buffer;
 
 D3D12VertexBuffer initDebugCube(D3D12Context* d3d_context) {
     D3D12VertexBuffer result = {};
@@ -391,7 +378,48 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
     return result;
 }
 
-void renderFrame(TestMatrices* matrices, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* pipeline, D3D12VertexBuffer* vertex_buffer) {
+enum DrawOrderType {
+    DRAW_ORDER_LOOK_AT,
+    DRAW_ORDER_SOLID_COLOR_CUBE,
+};
+
+struct DrawOrderLookAt {
+    v3 eye;
+    v3 target;
+    f32 fov;
+};
+
+struct DrawOrderSolidColorCube {
+    v3 position;
+    v3 scale;
+    v4 color;
+};
+
+struct DrawOrder {
+    DrawOrderType type;
+    union {
+        DrawOrderLookAt look_at;
+        DrawOrderSolidColorCube solid_color_cube;
+    };
+};
+
+void pushSolidColorCube(v3 position, v3 scale, v4 color) {
+    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
+    order->type = DRAW_ORDER_SOLID_COLOR_CUBE;
+    order->solid_color_cube.position = position;
+    order->solid_color_cube.scale = scale;
+    order->solid_color_cube.color = color;
+}
+
+void pushLookAtCamera(v3 eye, v3 target, f32 fov) {
+    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
+    order->type = DRAW_ORDER_LOOK_AT;
+    order->look_at.eye = eye;
+    order->look_at.target = target;
+    order->look_at.fov = fov;
+}
+
+void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* pipeline) {
     // NOTE: reset the frame's command allocator and list, now that they are no
     // longer in use
     HRESULT alloc_reset = current_frame->command_allocator->Reset();
@@ -443,14 +471,30 @@ void renderFrame(TestMatrices* matrices, HWND window, D3D12Context* d3d_context,
     current_frame->command_list->OMSetRenderTargets(1, &render_target_view, FALSE, NULL);
     current_frame->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    f32 cube_color[4] = {1, 0, 0, 1};
+    for (u32 i = 0; i < draw_orders_arena->used / sizeof(DrawOrder); i++) {
+        DrawOrder* order = &((DrawOrder*)(draw_orders_arena->base))[i];
 
-    current_frame->command_list->IASetVertexBuffers(0, 1, &vertex_buffer->view);
-    current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, cube_color, 0);
-    current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, matrices->model.data, 0);
-    current_frame->command_list->SetGraphicsRoot32BitConstants(2, 16, matrices->camera.data, 0);
+        switch (order->type) {
+            case DRAW_ORDER_LOOK_AT: {
+                m4 view = lookAt(order->look_at.eye, order->look_at.target);
+                m4 proj = makeProjection(0.1, 1000, order->look_at.fov);
+                m4 combined = proj * view;
+                current_frame->command_list->SetGraphicsRoot32BitConstants(2, 16, combined.data, 0);
+            } break;
+            case DRAW_ORDER_SOLID_COLOR_CUBE: {
+                current_frame->command_list->IASetVertexBuffers(0, 1, &global_cube_vertex_buffer.view);
+                current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, order->solid_color_cube.color.data, 0);
 
-    current_frame->command_list->DrawInstanced(vertex_buffer->count, 1, 0, 0);
+                m4 translation = makeTranslation(order->solid_color_cube.position);
+                m4 scale = makeScale(order->solid_color_cube.scale);
+                m4 combined = translation * scale;
+                current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, combined.data, 0);
+                current_frame->command_list->DrawInstanced(global_cube_vertex_buffer.count, 1, 0, 0);
+            } break;
+            default:
+                ASSERT(false);
+        }
+    }
 
     // NOTE: the backbuffer will now be prepared to be used for presentation
     D3D12_RESOURCE_BARRIER present_barrier = {};
@@ -661,11 +705,6 @@ void unloadGameCode(GameCode* game_code) {
     *game_code = {};
 }
 
-void pushSolidColorCube(v3 Position, v3 Scale, v4 color) {
-    // TODO
-    //OutputDebugStringA("pushDebugCube\n");
-}
-
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
 // for now is to apply default behavior and call PostQuitMessage in case of WM_DESTROY
 // event. This allows a blocking GetMessage loop to exit gracefully instead of keeping
@@ -692,7 +731,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassA(&window_class);
 
     HWND window = CreateWindowExA(
-        /* behavior */ 0,
+        /* behavior */ WS_EX_TOPMOST,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -712,17 +751,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     D3D12Context d3d_context = initD3D12(window);
     D3D12RenderPipeline solid_color_pipeline = initSolidColorPipeline(&d3d_context);
-    D3D12VertexBuffer cube_vertex_buffer = initDebugCube(&d3d_context);
+    global_cube_vertex_buffer = initDebugCube(&d3d_context);
 
     TimingInfo timing_info = initTimingInfo();
     GameMemory game_memory = {};
     game_memory.permanent_storage_size = MEGABYTES(64);
     game_memory.permanent_storage = VirtualAlloc((void*)TERABYTES(2), game_memory.permanent_storage_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT(game_memory.permanent_storage != NULL);
 
     GameCode game_code = {};
 
     PlatformAPI platform_api = {};
     platform_api.pushSolidColorCube = pushSolidColorCube;
+    platform_api.pushLookAtCamera = pushLookAtCamera;
+
+    usize draw_orders_capacity = MEGABYTES(1);
+    void* draw_orders_memory = VirtualAlloc(NULL, draw_orders_capacity, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT(draw_orders_memory != NULL);
+    global_draw_orders_arena = makeArena(draw_orders_memory, draw_orders_capacity);
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -771,12 +817,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
 
-        TestMatrices matrices;
         if (game_code.is_valid) {
             // TODO: compute the actual dt
-            matrices = game_code.game_update(1.f/60.f, &platform_api, &game_memory, current_input_state);
+            game_code.game_update(1.f/60.f, &platform_api, &game_memory, current_input_state);
         }
-        renderFrame(&matrices, window, &d3d_context, current_frame, &solid_color_pipeline, &cube_vertex_buffer);
+        renderFrame(&global_draw_orders_arena, window, &d3d_context, current_frame, &solid_color_pipeline);
+        clearArena(&global_draw_orders_arena);
 
         // NOTE: Swap the user input buffers
         InputState* tmp = current_input_state;
