@@ -59,7 +59,7 @@ struct ButtonState {
 // However you sometimes want the exact letter (e.g. I for inventory) so i need
 // to write a keycodeToScancode function eventually
 struct KeyboardState {
-    Vec2 mouse_screen_pos;
+    v2 mouse_screen_pos;
     ButtonState keys[SCANCODE_COUNT];
 };
 
@@ -75,8 +75,8 @@ struct ControllerState {
             ButtonState lb;
         };
     };
-    Vec2 left_stick;
-    Vec2 right_stick;
+    v2 left_stick;
+    v2 right_stick;
 };
 
 // TODO: support for multiple controllers ?

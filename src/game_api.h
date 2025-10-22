@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "renderer.h"
 #include "input.h"
 
 struct GameMemory {
@@ -9,5 +10,15 @@ struct GameMemory {
     void* permanent_storage; // NOTE: guaranteed to be filled with zeros at init
 };
 
+struct PlatformAPI {
+    decltype(pushSolidColorCube)* pushSolidColorCube;
+};
+
+struct TestMatrices {
+    m4 model;
+    m4 camera;
+};
+
+// TODO: should we pass the function pointers every frame ?
 extern "C"
-f32* gameUpdate(f32 dt, GameMemory* memory, InputState* input);
+TestMatrices gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input);

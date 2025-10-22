@@ -3,7 +3,13 @@
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
 #include <strsafe.h>
-#include "Microsoft/include/GameInput.h"
+#include "../firstparty/Microsoft/include/GameInput.h"
+
+// NOTE: windows.h defines those names...
+#undef near
+#undef far
+#undef min
+#undef max
 
 using namespace GameInput::v3;
 
@@ -50,6 +56,115 @@ struct D3D12Context {
     D3D12FrameContext frames[FRAMES_IN_FLIGHT];
     u32 current_frame_idx;
 };
+
+struct D3D12RenderPipeline {
+    ID3D12RootSignature* root_signature;
+    ID3D12PipelineState* pipeline_state;
+};
+
+struct D3D12VertexBuffer {
+    D3D12_VERTEX_BUFFER_VIEW view;
+    u32 count;
+};
+
+D3D12VertexBuffer initDebugCube(D3D12Context* d3d_context) {
+    D3D12VertexBuffer result = {};
+
+    f32 vertices_data[] = {
+        // Front face (z = +0.5)
+        -0.5f, -0.5f,  0.5f,
+        0.5f, -0.5f,  0.5f,
+        0.5f,  0.5f,  0.5f,
+        -0.5f, -0.5f,  0.5f,
+        0.5f,  0.5f,  0.5f,
+        -0.5f,  0.5f,  0.5f,
+
+        // Back face (z = -0.5)
+        0.5f, -0.5f, -0.5f,
+        -0.5f, -0.5f, -0.5f,
+        -0.5f,  0.5f, -0.5f,
+        0.5f, -0.5f, -0.5f,
+        -0.5f,  0.5f, -0.5f,
+        0.5f,  0.5f, -0.5f,
+
+        // Left face (x = -0.5)
+        -0.5f, -0.5f, -0.5f,
+        -0.5f, -0.5f,  0.5f,
+        -0.5f,  0.5f,  0.5f,
+        -0.5f, -0.5f, -0.5f,
+        -0.5f,  0.5f,  0.5f,
+        -0.5f,  0.5f, -0.5f,
+
+        // Right face (x = +0.5)
+        0.5f, -0.5f,  0.5f,
+        0.5f, -0.5f, -0.5f,
+        0.5f,  0.5f, -0.5f,
+        0.5f, -0.5f,  0.5f,
+        0.5f,  0.5f, -0.5f,
+        0.5f,  0.5f,  0.5f,
+
+        // Top face (y = +0.5)
+        -0.5f,  0.5f,  0.5f,
+        0.5f,  0.5f,  0.5f,
+        0.5f,  0.5f, -0.5f,
+        -0.5f,  0.5f,  0.5f,
+        0.5f,  0.5f, -0.5f,
+        -0.5f,  0.5f, -0.5f,
+
+        // Bottom face (y = -0.5)
+        -0.5f, -0.5f, -0.5f,
+        0.5f, -0.5f, -0.5f,
+        0.5f, -0.5f,  0.5f,
+        -0.5f, -0.5f, -0.5f,
+        0.5f, -0.5f,  0.5f,
+        -0.5f, -0.5f,  0.5f
+   };
+
+    // FIXME: the GPU has to get the data from RAM every frame bc this is a CPU-side heap...
+    // this is quicker for a hello triangle but needs to be changed ASAP
+    D3D12_HEAP_PROPERTIES upload_heap_props = {};
+    upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+    upload_heap_props.CreationNodeMask = 1;
+    upload_heap_props.VisibleNodeMask = 1;
+    upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+    D3D12_RESOURCE_DESC vertex_buffer_resource_desc = {};
+    vertex_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    vertex_buffer_resource_desc.Width = sizeof(vertices_data);
+    vertex_buffer_resource_desc.Height = 1;
+    vertex_buffer_resource_desc.DepthOrArraySize = 1;
+    vertex_buffer_resource_desc.MipLevels = 1;
+    vertex_buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+    vertex_buffer_resource_desc.SampleDesc.Count = 1;
+    vertex_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    vertex_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    ID3D12Resource* vertex_buffer;
+    d3d_context->device->CreateCommittedResource(&upload_heap_props, D3D12_HEAP_FLAG_NONE, &vertex_buffer_resource_desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&vertex_buffer));
+
+    // NOTE: we are not reading from it on the CPU
+    D3D12_RANGE read_range = {0, 0};
+    void* vertex_buffer_mapped_begin;
+    HRESULT map_res = vertex_buffer->Map(0, &read_range, &vertex_buffer_mapped_begin);
+    ASSERT(SUCCEEDED(map_res));
+
+    // NOTE: homemade memcpy
+    u32 vertices_data_bytesize = sizeof(vertices_data);
+    for (u32 i = 0; i < vertices_data_bytesize; i++) {
+        ((u8*)vertex_buffer_mapped_begin)[i] = ((u8*)vertices_data)[i];
+    }
+
+    vertex_buffer->Unmap(0, NULL /* null write range means we have written the entirety of the buffer */);
+
+    result.view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
+    result.view.StrideInBytes = 3 * sizeof(f32);
+    result.view.SizeInBytes = vertices_data_bytesize;
+
+    result.count = ARRAY_COUNT(vertices_data) / 3;
+
+    return result;
+}
 
 D3D12Context initD3D12(HWND window_handle) {
     D3D12Context context = {};
@@ -158,7 +273,125 @@ D3D12Context initD3D12(HWND window_handle) {
     return context;
 }
 
-void renderFrame(D3D12Context* d3d_context, D3D12FrameContext* current_frame, f32* clear_color) {
+D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
+    D3D12RenderPipeline result = {};
+
+    // NOTE: root signature with :
+    // - vec4 color
+    // - mat4 model
+    // - mat4 camera (proj * view)
+    D3D12_ROOT_PARAMETER root_parameters[3] = {};
+    root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[0].Constants.Num32BitValues = 4;
+    root_parameters[0].Constants.ShaderRegister = 0;
+    root_parameters[0].Constants.RegisterSpace = 0;
+
+    root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[1].Constants.Num32BitValues = 16;
+    root_parameters[1].Constants.ShaderRegister = 1;
+    root_parameters[1].Constants.RegisterSpace = 0;
+
+    root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    root_parameters[2].Constants.Num32BitValues = 16;
+    root_parameters[2].Constants.ShaderRegister = 2;
+    root_parameters[2].Constants.RegisterSpace = 0;
+
+    D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+    root_signature_desc.NumParameters = ARRAY_COUNT(root_parameters);
+    root_signature_desc.pParameters = root_parameters;
+    root_signature_desc.NumStaticSamplers = 0;
+    root_signature_desc.pStaticSamplers = NULL;
+    root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ID3DBlob* serialized_signature;
+    ID3DBlob* serialize_err;
+    D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized_signature, &serialize_err);
+    ASSERT(serialize_err == NULL);
+    HRESULT signature_res = d3d_context->device->CreateRootSignature(0, serialized_signature->GetBufferPointer(), serialized_signature->GetBufferSize(), IID_PPV_ARGS(&result.root_signature));
+    ASSERT(SUCCEEDED(signature_res));
+
+    // NOTE: shaders
+    ID3DBlob* vertex_shader;
+    ID3DBlob* pixel_shader;
+
+    ID3DBlob* vertex_shader_err;
+    ID3DBlob* pixel_shader_err;
+
+    // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
+    HRESULT vertex_res = D3DCompileFromFile(L".\\shaders\\solid_color.hlsl", NULL, NULL, "VSMain", "vs_5_0", 0, 0, &vertex_shader, &vertex_shader_err);
+    if (vertex_shader_err) {
+        OutputDebugStringA((char*)vertex_shader_err->GetBufferPointer());
+    }
+    ASSERT(SUCCEEDED(vertex_res));
+
+    HRESULT pixel_res = D3DCompileFromFile(L".\\shaders\\solid_color.hlsl", NULL, NULL, "PSMain", "ps_5_0", 0, 0, &pixel_shader, &pixel_shader_err);
+    if (pixel_shader_err) {
+        OutputDebugStringA((char*)pixel_shader_err->GetBufferPointer());
+    }
+    ASSERT(SUCCEEDED(pixel_res));
+
+    // NOTE : pipeline stages config
+    D3D12_INPUT_ELEMENT_DESC input_descriptions[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    };
+
+    D3D12_RASTERIZER_DESC rasterizer_desc = {};
+    rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
+    rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
+    rasterizer_desc.FrontCounterClockwise = true;
+    rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    rasterizer_desc.DepthClipEnable = TRUE;
+    rasterizer_desc.MultisampleEnable = FALSE;
+    rasterizer_desc.AntialiasedLineEnable = FALSE;
+    rasterizer_desc.ForcedSampleCount = 0;
+    rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+    D3D12_BLEND_DESC blend_desc = {};
+    blend_desc.AlphaToCoverageEnable = FALSE;
+    blend_desc.IndependentBlendEnable = FALSE;
+    blend_desc.RenderTarget[0].BlendEnable = FALSE;
+    blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
+    blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
+    pipeline_desc.InputLayout.pInputElementDescs = input_descriptions;
+    pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(input_descriptions);
+
+    pipeline_desc.pRootSignature = result.root_signature;
+
+    pipeline_desc.VS.pShaderBytecode = vertex_shader->GetBufferPointer();
+    pipeline_desc.VS.BytecodeLength = vertex_shader->GetBufferSize();
+    pipeline_desc.PS.pShaderBytecode = pixel_shader->GetBufferPointer();
+    pipeline_desc.PS.BytecodeLength = pixel_shader->GetBufferSize();
+
+    pipeline_desc.RasterizerState = rasterizer_desc;
+    pipeline_desc.BlendState = blend_desc;
+
+    pipeline_desc.SampleMask = UINT_MAX;
+    pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_desc.NumRenderTargets = 1;
+    pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pipeline_desc.SampleDesc.Count = 1;
+
+    HRESULT pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&result.pipeline_state));
+    ASSERT(SUCCEEDED(pipeline_res));
+
+    return result;
+}
+
+void renderFrame(TestMatrices* matrices, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* pipeline, D3D12VertexBuffer* vertex_buffer) {
     // NOTE: reset the frame's command allocator and list, now that they are no
     // longer in use
     HRESULT alloc_reset = current_frame->command_allocator->Reset();
@@ -175,13 +408,49 @@ void renderFrame(D3D12Context* d3d_context, D3D12FrameContext* current_frame, f3
     render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     current_frame->command_list->ResourceBarrier(1, &render_barrier);
 
+    // set pipeline state
+    // TODO: handle swapchain resize
+    D3D12_VIEWPORT viewport = {};
+    RECT clientRect;
+    GetClientRect(window, &clientRect);
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = clientRect.right - clientRect.left;
+    viewport.Height = clientRect.bottom - clientRect.top;
+    viewport.MinDepth = 0.0;
+    viewport.MaxDepth = 1.0;
+
+    D3D12_RECT scissor = {};
+    scissor.top = viewport.TopLeftY;
+    scissor.bottom = viewport.Height;
+    scissor.left = viewport.TopLeftX;
+    scissor.right = viewport.Width;
+
+    current_frame->command_list->SetPipelineState(pipeline->pipeline_state);
+    current_frame->command_list->SetGraphicsRootSignature(pipeline->root_signature);
+    current_frame->command_list->RSSetViewports(1, &viewport);
+    current_frame->command_list->RSSetScissorRects(1, &scissor);
+
     // NOTE: get the descriptor for backbuffer clearing
     // TODO: maybe put that in the frame context directly ?
     D3D12_CPU_DESCRIPTOR_HANDLE render_target_view;
     render_target_view.ptr = d3d_context->rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context->rtv_descriptor_size * d3d_context->current_frame_idx;
 
     // NOTE: clear and render
+    f32 clear_color[] = {0.1, 0.1, 0.3, 1.0};
     current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
+
+    current_frame->command_list->OMSetRenderTargets(1, &render_target_view, FALSE, NULL);
+    current_frame->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    f32 cube_color[4] = {1, 0, 0, 1};
+
+    current_frame->command_list->IASetVertexBuffers(0, 1, &vertex_buffer->view);
+    current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, cube_color, 0);
+    current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, matrices->model.data, 0);
+    current_frame->command_list->SetGraphicsRoot32BitConstants(2, 16, matrices->camera.data, 0);
+
+    current_frame->command_list->DrawInstanced(vertex_buffer->count, 1, 0, 0);
 
     // NOTE: the backbuffer will now be prepared to be used for presentation
     D3D12_RESOURCE_BARRIER present_barrier = {};
@@ -303,7 +572,7 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
         //    rel_mouse_x, rel_mouse_y);
         //OutputDebugStringA(print_buffer);
 
-        current_input_state->kb.mouse_screen_pos = Vec2 {rel_mouse_x, rel_mouse_y};
+        current_input_state->kb.mouse_screen_pos = v2 {rel_mouse_x, rel_mouse_y};
 
         mouse_reading->Release();
     }
@@ -340,8 +609,8 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
         current_input_state->ctrl.rb.transitions = (current_input_state->ctrl.rb.is_down != previous_input_state->ctrl.rb.is_down);
 
         // TODO: deadzone handling
-        current_input_state->ctrl.left_stick = Vec2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
-        current_input_state->ctrl.right_stick = Vec2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+        current_input_state->ctrl.left_stick = v2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
+        current_input_state->ctrl.right_stick = v2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
 
         pad_reading->Release();
     }
@@ -392,6 +661,11 @@ void unloadGameCode(GameCode* game_code) {
     *game_code = {};
 }
 
+void pushSolidColorCube(v3 Position, v3 Scale, v4 color) {
+    // TODO
+    //OutputDebugStringA("pushDebugCube\n");
+}
+
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
 // for now is to apply default behavior and call PostQuitMessage in case of WM_DESTROY
 // event. This allows a blocking GetMessage loop to exit gracefully instead of keeping
@@ -437,12 +711,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     global_running = true;
 
     D3D12Context d3d_context = initD3D12(window);
+    D3D12RenderPipeline solid_color_pipeline = initSolidColorPipeline(&d3d_context);
+    D3D12VertexBuffer cube_vertex_buffer = initDebugCube(&d3d_context);
+
     TimingInfo timing_info = initTimingInfo();
     GameMemory game_memory = {};
     game_memory.permanent_storage_size = MEGABYTES(64);
     game_memory.permanent_storage = VirtualAlloc((void*)TERABYTES(2), game_memory.permanent_storage_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     GameCode game_code = {};
+
+    PlatformAPI platform_api = {};
+    platform_api.pushSolidColorCube = pushSolidColorCube;
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -491,13 +771,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
 
-        f32 fallback_color[] = {0.9, 0.7, 0.3, 1.0};
-        f32* clear_color = fallback_color;
+        TestMatrices matrices;
         if (game_code.is_valid) {
             // TODO: compute the actual dt
-            clear_color = game_code.game_update(1.f/60.f, &game_memory, current_input_state);
+            matrices = game_code.game_update(1.f/60.f, &platform_api, &game_memory, current_input_state);
         }
-        renderFrame(&d3d_context, current_frame, clear_color);
+        renderFrame(&matrices, window, &d3d_context, current_frame, &solid_color_pipeline, &cube_vertex_buffer);
 
         // NOTE: Swap the user input buffers
         InputState* tmp = current_input_state;

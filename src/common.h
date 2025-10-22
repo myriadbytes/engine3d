@@ -20,8 +20,6 @@ typedef double f64;
 typedef int8_t b8;
 typedef int32_t b32;
 
-#define PI32 3.14159265359f
-
 #define ARRAY_COUNT(array) (sizeof(array) / sizeof(array[0]))
 
 #if ENGINE_SLOW
