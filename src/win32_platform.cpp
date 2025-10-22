@@ -38,6 +38,9 @@ struct D3D12Context {
     ID3D12DescriptorHeap* rtv_heap;
     u32 rtv_descriptor_size;
     ID3D12Resource* render_target_resources[FRAMES_IN_FLIGHT];
+    ID3D12DescriptorHeap* dsv_heap;
+    u32 dsv_descriptor_size;
+    ID3D12Resource* depth_target_resources[FRAMES_IN_FLIGHT];
     D3D12FrameContext frames[FRAMES_IN_FLIGHT];
     u32 current_frame_idx;
 };
@@ -236,6 +239,65 @@ D3D12Context initD3D12(HWND window_handle) {
         heap_ptr.ptr += context.rtv_descriptor_size;
     }
 
+    // NOTE: kinda the same thing for depth buffers, except we need to create them since they are not managed by the DXGI swapchain object
+    RECT client_rect;
+    GetClientRect(window_handle, &client_rect);
+
+    D3D12_RESOURCE_DESC depth_desc = {};
+    depth_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depth_desc.Width = client_rect.right;
+    depth_desc.Height = client_rect.bottom;
+    depth_desc.DepthOrArraySize = 1;
+    depth_desc.MipLevels = 1;
+    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    depth_desc.SampleDesc.Count = 1;
+    depth_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clear_value = {};
+    clear_value.Format = DXGI_FORMAT_D32_FLOAT;
+    clear_value.DepthStencil.Depth = 1.0f;
+    clear_value.DepthStencil.Stencil = 0;
+
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        D3D12_HEAP_PROPERTIES depth_heap_props = {};
+        depth_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+        depth_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        depth_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        depth_heap_props.CreationNodeMask = 1;
+        depth_heap_props.VisibleNodeMask = 1;
+
+        HRESULT heap_creation_result = context.device->CreateCommittedResource(
+            &depth_heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &depth_desc,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &clear_value,
+            IID_PPV_ARGS(&context.depth_target_resources[frame_idx])
+        );
+        ASSERT(SUCCEEDED(heap_creation_result));
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
+    dsv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
+    dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    HRESULT dsv_heap_res = context.device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&context.dsv_heap));
+    ASSERT(SUCCEEDED(dsv_heap_res));
+    context.dsv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+
+    // NOTE: fill the descriptor heap with our 2 depth buffer views
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_heap_ptr = context.dsv_heap->GetCPUDescriptorHandleForHeapStart();
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
+
+        context.device->CreateDepthStencilView(context.depth_target_resources[frame_idx], &dsv_desc, dsv_heap_ptr);
+        dsv_heap_ptr.ptr += context.dsv_descriptor_size;
+    }
+
     for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
         HRESULT command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context.frames[frame_idx].command_allocator));
         ASSERT(SUCCEEDED(command_allocator_res));
@@ -352,6 +414,12 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
     blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
     blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
+    D3D12_DEPTH_STENCIL_DESC depth_desc = {};
+    depth_desc.DepthEnable = TRUE;
+    depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+    depth_desc.StencilEnable = FALSE;
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
     pipeline_desc.InputLayout.pInputElementDescs = input_descriptions;
     pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(input_descriptions);
@@ -365,6 +433,9 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
 
     pipeline_desc.RasterizerState = rasterizer_desc;
     pipeline_desc.BlendState = blend_desc;
+
+    pipeline_desc.DepthStencilState = depth_desc;
+    pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
 
     pipeline_desc.SampleMask = UINT_MAX;
     pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -463,12 +534,15 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
     // TODO: maybe put that in the frame context directly ?
     D3D12_CPU_DESCRIPTOR_HANDLE render_target_view;
     render_target_view.ptr = d3d_context->rtv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context->rtv_descriptor_size * d3d_context->current_frame_idx;
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_buffer_view;
+    depth_buffer_view.ptr = d3d_context->dsv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context->dsv_descriptor_size * d3d_context->current_frame_idx;
 
     // NOTE: clear and render
     f32 clear_color[] = {0.1, 0.1, 0.3, 1.0};
     current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
+    current_frame->command_list->ClearDepthStencilView(depth_buffer_view, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
 
-    current_frame->command_list->OMSetRenderTargets(1, &render_target_view, FALSE, NULL);
+    current_frame->command_list->OMSetRenderTargets(1, &render_target_view, FALSE, &depth_buffer_view);
     current_frame->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     for (u32 i = 0; i < draw_orders_arena->used / sizeof(DrawOrder); i++) {
@@ -731,7 +805,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassA(&window_class);
 
     HWND window = CreateWindowExA(
-        /* behavior */ WS_EX_TOPMOST,
+        /* behavior */ 0,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,

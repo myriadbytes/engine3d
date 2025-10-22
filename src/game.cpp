@@ -27,7 +27,7 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
 
     // FIXME: sinf precision loss as time goes on
     f32 orbit_speed = 0.3;
-    f32 orbit_distance = 15;
+    f32 orbit_distance = 10;
     game_state->player_position.x = sinf(game_state->time * orbit_speed) * orbit_distance;
     game_state->player_position.z = cosf(game_state->time * orbit_speed) * orbit_distance;
 
@@ -36,8 +36,8 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     i16 width = 10;
     for (i16 x = -width / 2; x <= width / 2; x++) {
         for (i16 z = -width / 2; z <= width / 2; z++) {
-            v4 color = {(f32)(x + width / 2) / width, 0.9, (f32)(z + width / 2) / width, 1};
-            f32 height = (f32)x * sinf(game_state->time) * 2 + (f32)z * cosf(game_state->time) * 0.4;
+            v4 color = {(f32)(x + width / 2) / width, 0.1, (f32)(z + width / 2) / width, 1};
+            f32 height = (f32)x * sinf(game_state->time) * 0.2 + (f32)z * cosf(game_state->time) * 0.4;
             platform_api->pushSolidColorCube(v3 {(f32)x, height, f32(z)}, v3 {1, 1, 1}, color);
         }
     }
