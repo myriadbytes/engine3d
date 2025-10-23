@@ -330,7 +330,7 @@ D3D12Context initD3D12(HWND window_handle) {
     return context;
 }
 
-D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
+D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context, b32 wireframe) {
     D3D12RenderPipeline result = {};
 
     // NOTE: root signature with :
@@ -396,7 +396,7 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
     };
 
     D3D12_RASTERIZER_DESC rasterizer_desc = {};
-    rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
+    rasterizer_desc.FillMode = wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
     rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
     rasterizer_desc.FrontCounterClockwise = true;
     rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
@@ -459,7 +459,9 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context) {
 
 enum DrawOrderType {
     DRAW_ORDER_LOOK_AT,
-    DRAW_ORDER_SOLID_COLOR_CUBE,
+    DRAW_ORDER_DEBUG_CUBE,
+    DRAW_ORDER_SOLID_PIPELINE,
+    DRAW_ORDER_WIREFRAME_PIPELINE,
 };
 
 struct DrawOrderLookAt {
@@ -468,7 +470,7 @@ struct DrawOrderLookAt {
     f32 fov;
 };
 
-struct DrawOrderSolidColorCube {
+struct DrawOrderDebugCube {
     v3 position;
     v3 scale;
     v4 color;
@@ -478,16 +480,16 @@ struct DrawOrder {
     DrawOrderType type;
     union {
         DrawOrderLookAt look_at;
-        DrawOrderSolidColorCube solid_color_cube;
+        DrawOrderDebugCube debug_cube;
     };
 };
 
-void pushSolidColorCube(v3 position, v3 scale, v4 color) {
+void pushDebugCube(v3 position, v3 scale, v4 color) {
     DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_SOLID_COLOR_CUBE;
-    order->solid_color_cube.position = position;
-    order->solid_color_cube.scale = scale;
-    order->solid_color_cube.color = color;
+    order->type = DRAW_ORDER_DEBUG_CUBE;
+    order->debug_cube.position = position;
+    order->debug_cube.scale = scale;
+    order->debug_cube.color = color;
 }
 
 void pushLookAtCamera(v3 eye, v3 target, f32 fov) {
@@ -498,7 +500,17 @@ void pushLookAtCamera(v3 eye, v3 target, f32 fov) {
     order->look_at.fov = fov;
 }
 
-void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* pipeline) {
+void pushSolidColorPipeline() {
+    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
+    order->type = DRAW_ORDER_SOLID_PIPELINE;
+}
+
+void pushWireframePipeline() {
+    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
+    order->type = DRAW_ORDER_WIREFRAME_PIPELINE;
+}
+
+void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* solid_pipeline, D3D12RenderPipeline* wireframe_pipeline) {
     // NOTE: reset the frame's command allocator and list, now that they are no
     // longer in use
     HRESULT alloc_reset = current_frame->command_allocator->Reset();
@@ -533,8 +545,8 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
     scissor.left = viewport.TopLeftX;
     scissor.right = viewport.Width;
 
-    current_frame->command_list->SetPipelineState(pipeline->pipeline_state);
-    current_frame->command_list->SetGraphicsRootSignature(pipeline->root_signature);
+    current_frame->command_list->SetPipelineState(solid_pipeline->pipeline_state);
+    current_frame->command_list->SetGraphicsRootSignature(solid_pipeline->root_signature);
     current_frame->command_list->RSSetViewports(1, &viewport);
     current_frame->command_list->RSSetScissorRects(1, &scissor);
 
@@ -557,18 +569,26 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
         DrawOrder* order = &((DrawOrder*)(draw_orders_arena->base))[i];
 
         switch (order->type) {
+            case DRAW_ORDER_SOLID_PIPELINE: {
+                current_frame->command_list->SetPipelineState(solid_pipeline->pipeline_state);
+                current_frame->command_list->SetGraphicsRootSignature(solid_pipeline->root_signature);
+            } break;
+            case DRAW_ORDER_WIREFRAME_PIPELINE: {
+                current_frame->command_list->SetPipelineState(wireframe_pipeline->pipeline_state);
+                current_frame->command_list->SetGraphicsRootSignature(wireframe_pipeline->root_signature);
+            } break;
             case DRAW_ORDER_LOOK_AT: {
                 m4 view = lookAt(order->look_at.eye, order->look_at.target);
                 m4 proj = makeProjection(0.1, 1000, order->look_at.fov);
                 m4 combined = proj * view;
                 current_frame->command_list->SetGraphicsRoot32BitConstants(2, 16, combined.data, 0);
             } break;
-            case DRAW_ORDER_SOLID_COLOR_CUBE: {
+            case DRAW_ORDER_DEBUG_CUBE: {
                 current_frame->command_list->IASetVertexBuffers(0, 1, &global_cube_vertex_buffer.view);
-                current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, order->solid_color_cube.color.data, 0);
+                current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, order->debug_cube.color.data, 0);
 
-                m4 translation = makeTranslation(order->solid_color_cube.position);
-                m4 scale = makeScale(order->solid_color_cube.scale);
+                m4 translation = makeTranslation(order->debug_cube.position);
+                m4 scale = makeScale(order->debug_cube.scale);
                 m4 combined = translation * scale;
                 current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, combined.data, 0);
                 current_frame->command_list->DrawInstanced(global_cube_vertex_buffer.count, 1, 0, 0);
@@ -834,7 +854,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     global_running = true;
 
     D3D12Context d3d_context = initD3D12(window);
-    D3D12RenderPipeline solid_color_pipeline = initSolidColorPipeline(&d3d_context);
+    D3D12RenderPipeline solid_color_pipeline = initSolidColorPipeline(&d3d_context, false);
+    D3D12RenderPipeline wireframe_pipeline = initSolidColorPipeline(&d3d_context, true);
     global_cube_vertex_buffer = initDebugCube(&d3d_context);
 
     TimingInfo timing_info = initTimingInfo();
@@ -846,10 +867,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     GameCode game_code = {};
 
     PlatformAPI platform_api = {};
-    platform_api.pushSolidColorCube = pushSolidColorCube;
+    platform_api.pushDebugCube = pushDebugCube;
     platform_api.pushLookAtCamera = pushLookAtCamera;
+    platform_api.pushSolidColorPipeline = pushSolidColorPipeline;
+    platform_api.pushWireframePipeline = pushWireframePipeline;
 
-    usize draw_orders_capacity = MEGABYTES(1);
+    usize draw_orders_capacity = MEGABYTES(2);
     void* draw_orders_memory = VirtualAlloc(NULL, draw_orders_capacity, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT(draw_orders_memory != NULL);
     global_draw_orders_arena = makeArena(draw_orders_memory, draw_orders_capacity);
@@ -869,7 +892,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
-        //printTimingInfo(&timing_info);
+        printTimingInfo(&timing_info);
 
         // NOTE: reload game code
         const char* dll_name = "game.dll";
@@ -905,7 +928,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             // TODO: compute the actual dt
             game_code.game_update(1.f/60.f, &platform_api, &game_memory, &current_input_state->input_state);
         }
-        renderFrame(&global_draw_orders_arena, window, &d3d_context, current_frame, &solid_color_pipeline);
+        renderFrame(&global_draw_orders_arena, window, &d3d_context, current_frame, &solid_color_pipeline, &wireframe_pipeline);
         clearArena(&global_draw_orders_arena);
 
         // NOTE: Swap the user input buffers

@@ -1,4 +1,4 @@
-TO-DO LIST:
+TO-DO ENGINE:
 - Swapchain resizing
 - Sound output (WASAPI ?)
 - Save states (like an emulator)
@@ -10,6 +10,10 @@ TO-DO LIST:
 - UI & Text Rendering
 - Thread pool ?? For async asset streaming
 - Generate a `compile_commands.json` inside the build script (easier than it sounds)
+
+TO-DO GAME:
+- Chunk streaming system
+- Chunk meshing
 
 PROTOTYPED :
 - Code hot-reloading

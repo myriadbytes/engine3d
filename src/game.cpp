@@ -1,15 +1,23 @@
 #include "game_api.h"
 
+constexpr usize CHUNK_W = 16;
+
 struct GameState {
-    v3 player_position;
     f32 time;
+    RandomSeries random_series;
+
     f32 camera_pitch;
     f32 camera_yaw;
-    RandomSeries random_series;
+    v3 player_position;
+
+    u32 chunk[CHUNK_W * CHUNK_W * CHUNK_W];
+
+    b32 is_wireframe;
 };
 
 extern "C"
 void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
+    ASSERT(memory->permanent_storage_size >= sizeof(GameState));
     GameState* game_state = (GameState*)memory->permanent_storage;
 
     if(!memory->is_initialized) {
@@ -17,6 +25,13 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
         game_state->time = 0;
         game_state->camera_yaw = 3 * PI32 / 2;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
+
+        for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
+            if (randomNextU32(&game_state->random_series) % 2) {
+                game_state->chunk[i] = 1;
+            }
+        }
+
         memory->is_initialized = true;
     }
 
@@ -35,8 +50,6 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
 
     v3 camera_right = normalize(cross(camera_forward, {0, 1, 0}));
-
-    platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 
     f32 speed = 5 * dt;
     if (input->kb.keys[SCANCODE_LSHIFT].is_down) {
@@ -62,24 +75,30 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
         game_state->player_position += camera_forward * speed;
     }
 
-    // FIXME: sinf precision loss as time goes on
-    //f32 orbit_speed = 0.3;
-    //f32 orbit_distance = 8;
-    //game_state->player_position.x = sinf(game_state->time * orbit_speed) * orbit_distance;
-    //game_state->player_position.z = cosf(game_state->time * orbit_speed) * orbit_distance;
+    if (input->kb.keys[SCANCODE_G].is_down && input->kb.keys[SCANCODE_G].transitions == 1) {
+        game_state->is_wireframe = !game_state->is_wireframe;
+    }
 
-    i16 width = 8;
-    for (i16 x = -width / 2; x <= width / 2; x++) {
-        for (i16 z = -width / 2; z <= width / 2; z++) {
-            //f32 height = (f32)x * sinf(game_state->time) * 0.1 + (f32)z * cosf(game_state->time) * 0.1;
+    if (game_state->is_wireframe) {
+        platform_api->pushWireframePipeline();
+    } else {
+        platform_api->pushSolidColorPipeline();
+    }
+    platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 
-            f32 height = randomUnilateral(&game_state->random_series);
+    for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
+        if (!game_state->chunk[i]) continue;
 
-            v4 color;
-            color.r = ((f32)x + ((f32)width / 2.f)) / (f32)width;
-            color.g = 0.1;
-            color.b = ((f32)z + ((f32)width / 2.f)) / (f32)width;
-            platform_api->pushSolidColorCube(v3 {(f32)x, height, f32(z)}, v3 {1, 1, 1}, color);
-        }
+        usize y = (i / (CHUNK_W * CHUNK_W));
+        usize z = (i % (CHUNK_W * CHUNK_W)) / CHUNK_W;
+        usize x = (i % CHUNK_W);
+
+        v3 position = {(f32)x, (f32)y, (f32)z};
+        f32 y_color = (f32)y / CHUNK_W;
+        f32 z_color = (f32)z / CHUNK_W;
+        f32 x_color = (f32)x / CHUNK_W;
+        v4 color = {x_color, y_color, z_color, 1.0};
+
+        platform_api->pushDebugCube(position, v3 {1, 1, 1}, color);
     }
 }
