@@ -21,6 +21,14 @@ using namespace GameInput::v3;
 global b32 global_running = false;
 global Arena global_draw_orders_arena = {};
 
+// NOTE: due to the way Microsoft's GameInput works, we need to keep
+// more state around than what we want to present to the user
+struct WindowsInputState {
+    InputState input_state;
+    i64 mouse_accumulated_x;
+    i64 mouse_accumulated_y;
+};
+
 struct D3D12FrameContext {
     ID3D12CommandAllocator* command_allocator;
     ID3D12GraphicsCommandList* command_list;
@@ -160,9 +168,9 @@ D3D12Context initD3D12(HWND window_handle) {
     D3D12Context context = {};
 
     // FIXME: release all the COM objects
-    HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
-    ASSERT(SUCCEEDED(debug_res));
-    context.debug_interface->EnableDebugLayer();
+    //HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
+    //ASSERT(SUCCEEDED(debug_res));
+    //context.debug_interface->EnableDebugLayer();
 
     IDXGIFactory4* factory;
     HRESULT factory_res = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -638,7 +646,7 @@ void printTimingInfo(TimingInfo* info) {
     OutputDebugStringA(print_buffer);
 }
 
-void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_input_state, InputState* current_input_state) {
+void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previous_input_state, WindowsInputState* current_input_state) {
 
     // NOTE: clear the current input state since we are polling the whole state every frame
     *current_input_state = {};
@@ -647,7 +655,7 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
     HRESULT kb_reading_res = game_input->GetCurrentReading(GameInputKindKeyboard, nullptr, &kb_reading);
 
     if (SUCCEEDED(kb_reading_res)) {
-        current_input_state->is_analog = false;
+        current_input_state->input_state.is_analog = false;
 
         // NOTE: up to 16 different keys pressed at the same time
         // most keyboards upport fewer simultaneous presses than that
@@ -660,8 +668,8 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
             GameInputKeyState key = key_states[i];
 
             ASSERT(key.scanCode < SCANCODE_COUNT);
-            current_input_state->kb.keys[key.scanCode].is_down = true;
-            current_input_state->kb.keys[key.scanCode].transitions = (current_input_state->kb.keys[key.scanCode].is_down != previous_input_state->kb.keys[key.scanCode].is_down);
+            current_input_state->input_state.kb.keys[key.scanCode].is_down = true;
+            current_input_state->input_state.kb.keys[key.scanCode].transitions = (current_input_state->input_state.kb.keys[key.scanCode].is_down != previous_input_state->input_state.kb.keys[key.scanCode].is_down);
         }
 
         kb_reading->Release();
@@ -671,7 +679,7 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
     HRESULT mouse_reading_res = game_input->GetCurrentReading(GameInputKindMouse, nullptr, &mouse_reading);
 
     if (SUCCEEDED(mouse_reading_res)) {
-        current_input_state->is_analog = false;
+        current_input_state->input_state.is_analog = false;
 
         GameInputMouseState mouse_state;
         mouse_reading->GetMouseState(&mouse_state);
@@ -680,17 +688,19 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
         // (0, 0) -> top left
         // (1, 1) -> bottom right
         // TODO: should this be clamped ?
-        RECT window_rect;
-        GetWindowRect(window, &window_rect);
-        f32 rel_mouse_x = (f32)(mouse_state.absolutePositionX - window_rect.left) / (f32) (window_rect.right - window_rect.left);
-        f32 rel_mouse_y = (f32)(mouse_state.absolutePositionY - window_rect.top) / (f32) (window_rect.bottom - window_rect.top);
+        //RECT window_rect;
+        //GetWindowRect(window, &window_rect);
+        //f32 rel_mouse_x = (f32)(mouse_state.absolutePositionX - window_rect.left) / (f32) (window_rect.right - window_rect.left);
+        //f32 rel_mouse_y = (f32)(mouse_state.absolutePositionY - window_rect.top) / (f32) (window_rect.bottom - window_rect.top);
+        //current_input_state->kb.mouse_screen_pos = v2 {rel_mouse_x, rel_mouse_y};
 
-        //char print_buffer[256];
-        //StringCbPrintfA(print_buffer, 256, "MouseX: %.02f, MouseY: %.02f\n",
-        //    rel_mouse_x, rel_mouse_y);
-        //OutputDebugStringA(print_buffer);
-
-        current_input_state->kb.mouse_screen_pos = v2 {rel_mouse_x, rel_mouse_y};
+        // NOTE: mouse movement delta
+        // TODO: do we want it in pixels ? or normalized ? meaning should a smaller window have more sensitivity ?
+        current_input_state->mouse_accumulated_x = mouse_state.positionX;
+        current_input_state->mouse_accumulated_y = mouse_state.positionY;
+        i64 delta_x = current_input_state->mouse_accumulated_x - previous_input_state->mouse_accumulated_x;
+        i64 delta_y = current_input_state->mouse_accumulated_y - previous_input_state->mouse_accumulated_y;
+        current_input_state->input_state.kb.mouse_delta = v2 {(f32) delta_x, (f32) -delta_y};
 
         mouse_reading->Release();
     }
@@ -703,32 +713,32 @@ void pollGameInput(HWND window, IGameInput* game_input, InputState* previous_inp
         // since we have a reading every frame when a controller is plugged in no matter if the user actually touched his controller or not
         // so the current behavior is that the input is considered analog if there is a gamepad connected
         // this could be fixed by using the event-driven GameInput API? or doing a diff with polling
-        current_input_state->is_analog = true;
+        current_input_state->input_state.is_analog = true;
 
         GameInputGamepadState pad_state;
         pad_reading->GetGamepadState(&pad_state);
 
-        current_input_state->ctrl.a.is_down = (pad_state.buttons & GameInputGamepadA) == GameInputGamepadA;
-        current_input_state->ctrl.a.transitions = (current_input_state->ctrl.a.is_down != previous_input_state->ctrl.a.is_down);
+        current_input_state->input_state.ctrl.a.is_down = (pad_state.buttons & GameInputGamepadA) == GameInputGamepadA;
+        current_input_state->input_state.ctrl.a.transitions = (current_input_state->input_state.ctrl.a.is_down != previous_input_state->input_state.ctrl.a.is_down);
 
-        current_input_state->ctrl.b.is_down = (pad_state.buttons & GameInputGamepadB) == GameInputGamepadB;
-        current_input_state->ctrl.b.transitions = (current_input_state->ctrl.b.is_down != previous_input_state->ctrl.b.is_down);
+        current_input_state->input_state.ctrl.b.is_down = (pad_state.buttons & GameInputGamepadB) == GameInputGamepadB;
+        current_input_state->input_state.ctrl.b.transitions = (current_input_state->input_state.ctrl.b.is_down != previous_input_state->input_state.ctrl.b.is_down);
 
-        current_input_state->ctrl.x.is_down = (pad_state.buttons & GameInputGamepadX) == GameInputGamepadX;
-        current_input_state->ctrl.x.transitions = (current_input_state->ctrl.x.is_down != previous_input_state->ctrl.x.is_down);
+        current_input_state->input_state.ctrl.x.is_down = (pad_state.buttons & GameInputGamepadX) == GameInputGamepadX;
+        current_input_state->input_state.ctrl.x.transitions = (current_input_state->input_state.ctrl.x.is_down != previous_input_state->input_state.ctrl.x.is_down);
 
-        current_input_state->ctrl.y.is_down = (pad_state.buttons & GameInputGamepadY) == GameInputGamepadY;
-        current_input_state->ctrl.y.transitions = (current_input_state->ctrl.y.is_down != previous_input_state->ctrl.y.is_down);
+        current_input_state->input_state.ctrl.y.is_down = (pad_state.buttons & GameInputGamepadY) == GameInputGamepadY;
+        current_input_state->input_state.ctrl.y.transitions = (current_input_state->input_state.ctrl.y.is_down != previous_input_state->input_state.ctrl.y.is_down);
 
-        current_input_state->ctrl.lb.is_down = (pad_state.buttons & GameInputGamepadRightShoulder) == GameInputGamepadRightShoulder;
-        current_input_state->ctrl.lb.transitions = (current_input_state->ctrl.lb.is_down != previous_input_state->ctrl.lb.is_down);
+        current_input_state->input_state.ctrl.lb.is_down = (pad_state.buttons & GameInputGamepadRightShoulder) == GameInputGamepadRightShoulder;
+        current_input_state->input_state.ctrl.lb.transitions = (current_input_state->input_state.ctrl.lb.is_down != previous_input_state->input_state.ctrl.lb.is_down);
 
-        current_input_state->ctrl.rb.is_down = (pad_state.buttons & GameInputGamepadLeftShoulder) == GameInputGamepadLeftShoulder;
-        current_input_state->ctrl.rb.transitions = (current_input_state->ctrl.rb.is_down != previous_input_state->ctrl.rb.is_down);
+        current_input_state->input_state.ctrl.rb.is_down = (pad_state.buttons & GameInputGamepadLeftShoulder) == GameInputGamepadLeftShoulder;
+        current_input_state->input_state.ctrl.rb.transitions = (current_input_state->input_state.ctrl.rb.is_down != previous_input_state->input_state.ctrl.rb.is_down);
 
         // TODO: deadzone handling
-        current_input_state->ctrl.left_stick = v2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
-        current_input_state->ctrl.right_stick = v2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+        current_input_state->input_state.ctrl.left_stick = v2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
+        current_input_state->input_state.ctrl.right_stick = v2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
 
         pad_reading->Release();
     }
@@ -847,9 +857,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
     // collection in a separate thread
-    InputState input_states[2] = {};
-    InputState* current_input_state = &input_states[0];
-    InputState* previous_input_state = &input_states[1];
+    WindowsInputState input_states[2] = {};
+    WindowsInputState* current_input_state = &input_states[0];
+    WindowsInputState* previous_input_state = &input_states[1];
 
     IGameInput* microsoft_game_input_interface;
     HRESULT ginput_create_res = GameInputCreate(&microsoft_game_input_interface);
@@ -893,13 +903,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         if (game_code.is_valid) {
             // TODO: compute the actual dt
-            game_code.game_update(1.f/60.f, &platform_api, &game_memory, current_input_state);
+            game_code.game_update(1.f/60.f, &platform_api, &game_memory, &current_input_state->input_state);
         }
         renderFrame(&global_draw_orders_arena, window, &d3d_context, current_frame, &solid_color_pipeline);
         clearArena(&global_draw_orders_arena);
 
         // NOTE: Swap the user input buffers
-        InputState* tmp = current_input_state;
+        WindowsInputState* tmp = current_input_state;
         current_input_state = previous_input_state;
         previous_input_state = tmp;
     }

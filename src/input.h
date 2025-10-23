@@ -37,6 +37,7 @@ enum Scancode {
     SCANCODE_J = 0x24,
     SCANCODE_K = 0x25,
     SCANCODE_L = 0x26,
+    SCANCODE_LSHIFT = 0x2A,
     SCANCODE_Z = 0x2C,
     SCANCODE_X = 0x2D,
     SCANCODE_C = 0x2E,
@@ -44,6 +45,7 @@ enum Scancode {
     SCANCODE_B = 0x30,
     SCANCODE_N = 0x31,
     SCANCODE_M = 0x32,
+    SCANCODE_RSHIFT = 0x36,
     SCANCODE_SPACE = 0x39,
     SCANCODE_COUNT = 0x1FF,
 };
@@ -59,7 +61,7 @@ struct ButtonState {
 // However you sometimes want the exact letter (e.g. I for inventory) so i need
 // to write a keycodeToScancode function eventually
 struct KeyboardState {
-    v2 mouse_screen_pos;
+    v2 mouse_delta;
     ButtonState keys[SCANCODE_COUNT];
 };
 

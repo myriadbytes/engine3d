@@ -281,3 +281,9 @@ inline m4 makeScale(v3 a) {
 
 m4 lookAt(v3 eye, v3 target);
 m4 makeProjection(f32 near, f32 far, f32 fov);
+
+inline f32 clamp(f32 x, f32 min, f32 max) {
+    if (x < min) return min;
+    if (x > max) return max;
+    return x;
+}
