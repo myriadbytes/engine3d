@@ -11,9 +11,27 @@ struct GameState {
     v3 player_position;
 
     u32 chunk[CHUNK_W * CHUNK_W * CHUNK_W];
+    v3 chunk_vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2]; // this is the worst case situation, with a checkboard chunk
+    usize chunk_vertices_nb;
 
     b32 is_wireframe;
 };
+
+void naiveMeshChunk(GameState* game_state) {
+    usize emitted = 0;
+    for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
+        usize y = (i / (CHUNK_W * CHUNK_W));
+        usize z = (i % (CHUNK_W * CHUNK_W)) / CHUNK_W;
+        usize x = (i % CHUNK_W);
+
+        v3 position = {(f32)x, (f32)y, (f32)z};
+        game_state->chunk_vertices[emitted++] = position;
+        game_state->chunk_vertices[emitted++] = position + v3 {0, 0, 1};
+        game_state->chunk_vertices[emitted++] = position + v3 {1, 0, 0};
+    }
+
+    game_state->chunk_vertices_nb = emitted;
+}
 
 extern "C"
 void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
@@ -31,6 +49,9 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
                 game_state->chunk[i] = 1;
             }
         }
+
+        naiveMeshChunk(game_state);
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk_vertices, game_state->chunk_vertices_nb * sizeof(v3));
 
         memory->is_initialized = true;
     }
@@ -86,6 +107,7 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     }
     platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 
+    /*
     for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
         if (!game_state->chunk[i]) continue;
 
@@ -101,4 +123,6 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
 
         platform_api->pushDebugCube(position, v3 {1, 1, 1}, color);
     }
+    */
+    platform_api->pushDebugMesh(v3 {0, 0, 0});
 }

@@ -9,12 +9,18 @@ struct GameMemory {
     void* permanent_storage; // NOTE: guaranteed to be filled with zeros at init
 };
 
+void debugUploadMeshBlocking(f32* data, usize size);
+
 void pushSolidColorPipeline();
 void pushWireframePipeline();
 void pushDebugCube(v3 position, v3 scale, v4 color);
+void pushDebugMesh(v3 position);
 void pushLookAtCamera(v3 eye, v3 target, f32 fov);
 
 struct PlatformAPI {
+    decltype(debugUploadMeshBlocking)* debugUploadMeshBlocking;
+    decltype(pushDebugMesh)* pushDebugMesh;
+
     decltype(pushDebugCube)* pushDebugCube;
     decltype(pushLookAtCamera)* pushLookAtCamera;
     decltype(pushSolidColorPipeline)* pushSolidColorPipeline;
