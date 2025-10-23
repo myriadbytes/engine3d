@@ -5,7 +5,7 @@ TO-DO LIST:
 - Looped input recording & playback
 - "Topmost" window mode
 - Matrix math library
-- High level retro 3D artstyle renderer API
+- High level renderer API
 - Logging
 - UI & Text Rendering
 - Thread pool ?? For async asset streaming

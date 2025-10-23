@@ -7,7 +7,7 @@
 
 #define PI32 3.14159265359f
 
-// STRUCTURES
+// MATRIX STRUCTURES
 
 struct v2 {
     union {
@@ -58,7 +58,7 @@ struct m4 {
     }
 };
 
-// OPERATORS
+// MATRIX OPERATORS
 
 inline v2 operator+ (v2 a, v2 b) {
     v2 result;
@@ -205,7 +205,7 @@ inline m4 operator*(m4 a, m4 b) {
     return result;
 }
 
-// FUNCTIONS
+// MATRIX FUNCTIONS
 
 inline f32 dot(v3 a, v3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
@@ -282,8 +282,32 @@ inline m4 makeScale(v3 a) {
 m4 lookAt(v3 eye, v3 target);
 m4 makeProjection(f32 near, f32 far, f32 fov);
 
+// GENERAL
+
 inline f32 clamp(f32 x, f32 min, f32 max) {
     if (x < min) return min;
     if (x > max) return max;
     return x;
+}
+
+// RNG
+
+// NOTE: this is a standard xorshift64* algorithm
+// https://en.wikipedia.org/wiki/Xorshift#xorshift*
+
+typedef u64 RandomSeries;
+
+inline u32 randomNextU32(RandomSeries* series) {
+    *series = *series ^ (*series >> 12);
+    *series = *series ^ (*series << 25);
+    *series = *series ^ (*series >> 27);
+
+    return (*series * 0x2545F4914F6CDD1DULL) >> 32;
+}
+
+// NOTE: random float between 0 and 1
+inline f32 randomUnilateral(RandomSeries* series) {
+    u32 sample = randomNextU32(series);
+
+    return (1.f / (f32)UINT32_MAX) * (f32)sample;
 }

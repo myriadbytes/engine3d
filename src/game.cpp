@@ -5,6 +5,7 @@ struct GameState {
     f32 time;
     f32 camera_pitch;
     f32 camera_yaw;
+    RandomSeries random_series;
 };
 
 extern "C"
@@ -15,6 +16,7 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
         game_state->player_position = {0, 5, 8};
         game_state->time = 0;
         game_state->camera_yaw = 3 * PI32 / 2;
+        game_state->random_series = 0xC0FFEE; // fixed seed for now
         memory->is_initialized = true;
     }
 
@@ -69,7 +71,9 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     i16 width = 8;
     for (i16 x = -width / 2; x <= width / 2; x++) {
         for (i16 z = -width / 2; z <= width / 2; z++) {
-            f32 height = (f32)x * sinf(game_state->time) * 0.1 + (f32)z * cosf(game_state->time) * 0.1;
+            //f32 height = (f32)x * sinf(game_state->time) * 0.1 + (f32)z * cosf(game_state->time) * 0.1;
+
+            f32 height = randomUnilateral(&game_state->random_series);
 
             v4 color;
             color.r = ((f32)x + ((f32)width / 2.f)) / (f32)width;

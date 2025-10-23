@@ -168,9 +168,9 @@ D3D12Context initD3D12(HWND window_handle) {
     D3D12Context context = {};
 
     // FIXME: release all the COM objects
-    //HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
-    //ASSERT(SUCCEEDED(debug_res));
-    //context.debug_interface->EnableDebugLayer();
+    HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
+    ASSERT(SUCCEEDED(debug_res));
+    context.debug_interface->EnableDebugLayer();
 
     IDXGIFactory4* factory;
     HRESULT factory_res = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
@@ -684,7 +684,7 @@ void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previ
         GameInputMouseState mouse_state;
         mouse_reading->GetMouseState(&mouse_state);
 
-        // NOTE: normalized mouse coordinates relative to the window
+        // TODO: normalized mouse coordinates relative to the window
         // (0, 0) -> top left
         // (1, 1) -> bottom right
         // TODO: should this be clamped ?
