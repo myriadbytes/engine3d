@@ -61,111 +61,12 @@ struct D3D12RenderPipeline {
 };
 
 struct D3D12VertexBuffer {
+    ID3D12Resource* buffer;
     D3D12_VERTEX_BUFFER_VIEW view;
     u32 count;
 };
 
-global D3D12VertexBuffer global_cube_vertex_buffer;
 global D3D12VertexBuffer global_debug_mesh_vertex_buffer;
-
-D3D12VertexBuffer initDebugCube(D3D12Context* d3d_context) {
-    D3D12VertexBuffer result = {};
-
-    f32 vertices_data[] = {
-        // Front face (z = +0.5)
-        -0.5f, -0.5f,  0.5f,
-        0.5f, -0.5f,  0.5f,
-        0.5f,  0.5f,  0.5f,
-        -0.5f, -0.5f,  0.5f,
-        0.5f,  0.5f,  0.5f,
-        -0.5f,  0.5f,  0.5f,
-
-        // Back face (z = -0.5)
-        0.5f, -0.5f, -0.5f,
-        -0.5f, -0.5f, -0.5f,
-        -0.5f,  0.5f, -0.5f,
-        0.5f, -0.5f, -0.5f,
-        -0.5f,  0.5f, -0.5f,
-        0.5f,  0.5f, -0.5f,
-
-        // Left face (x = -0.5)
-        -0.5f, -0.5f, -0.5f,
-        -0.5f, -0.5f,  0.5f,
-        -0.5f,  0.5f,  0.5f,
-        -0.5f, -0.5f, -0.5f,
-        -0.5f,  0.5f,  0.5f,
-        -0.5f,  0.5f, -0.5f,
-
-        // Right face (x = +0.5)
-        0.5f, -0.5f,  0.5f,
-        0.5f, -0.5f, -0.5f,
-        0.5f,  0.5f, -0.5f,
-        0.5f, -0.5f,  0.5f,
-        0.5f,  0.5f, -0.5f,
-        0.5f,  0.5f,  0.5f,
-
-        // Top face (y = +0.5)
-        -0.5f,  0.5f,  0.5f,
-        0.5f,  0.5f,  0.5f,
-        0.5f,  0.5f, -0.5f,
-        -0.5f,  0.5f,  0.5f,
-        0.5f,  0.5f, -0.5f,
-        -0.5f,  0.5f, -0.5f,
-
-        // Bottom face (y = -0.5)
-        -0.5f, -0.5f, -0.5f,
-        0.5f, -0.5f, -0.5f,
-        0.5f, -0.5f,  0.5f,
-        -0.5f, -0.5f, -0.5f,
-        0.5f, -0.5f,  0.5f,
-        -0.5f, -0.5f,  0.5f
-   };
-
-    // FIXME: the GPU has to get the data from RAM every frame bc this is a CPU-side heap...
-    // this is quicker for a hello triangle but needs to be changed ASAP
-    D3D12_HEAP_PROPERTIES upload_heap_props = {};
-    upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
-    upload_heap_props.CreationNodeMask = 1;
-    upload_heap_props.VisibleNodeMask = 1;
-    upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-
-    D3D12_RESOURCE_DESC vertex_buffer_resource_desc = {};
-    vertex_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    vertex_buffer_resource_desc.Width = sizeof(vertices_data);
-    vertex_buffer_resource_desc.Height = 1;
-    vertex_buffer_resource_desc.DepthOrArraySize = 1;
-    vertex_buffer_resource_desc.MipLevels = 1;
-    vertex_buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-    vertex_buffer_resource_desc.SampleDesc.Count = 1;
-    vertex_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    vertex_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-    ID3D12Resource* vertex_buffer;
-    d3d_context->device->CreateCommittedResource(&upload_heap_props, D3D12_HEAP_FLAG_NONE, &vertex_buffer_resource_desc, D3D12_RESOURCE_STATE_GENERIC_READ, NULL, IID_PPV_ARGS(&vertex_buffer));
-
-    // NOTE: we are not reading from it on the CPU
-    D3D12_RANGE read_range = {0, 0};
-    void* vertex_buffer_mapped_begin;
-    HRESULT map_res = vertex_buffer->Map(0, &read_range, &vertex_buffer_mapped_begin);
-    ASSERT(SUCCEEDED(map_res));
-
-    // NOTE: homemade memcpy
-    u32 vertices_data_bytesize = sizeof(vertices_data);
-    for (u32 i = 0; i < vertices_data_bytesize; i++) {
-        ((u8*)vertex_buffer_mapped_begin)[i] = ((u8*)vertices_data)[i];
-    }
-
-    vertex_buffer->Unmap(0, NULL /* null write range means we have written the entirety of the buffer */);
-
-    result.view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
-    result.view.StrideInBytes = 3 * sizeof(f32);
-    result.view.SizeInBytes = vertices_data_bytesize;
-
-    result.count = ARRAY_COUNT(vertices_data) / 3;
-
-    return result;
-}
 
 D3D12Context initD3D12(HWND window_handle) {
     D3D12Context context = {};
@@ -333,7 +234,7 @@ D3D12Context initD3D12(HWND window_handle) {
     return context;
 }
 
-D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context, b32 wireframe) {
+D3D12RenderPipeline initDebugChunkPipeline(D3D12Context* d3d_context, b32 wireframe, b32 backface_culling) {
     D3D12RenderPipeline result = {};
 
     // NOTE: root signature with :
@@ -381,13 +282,13 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context, b32 wirefr
     ID3DBlob* pixel_shader_err;
 
     // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
-    HRESULT vertex_res = D3DCompileFromFile(L".\\shaders\\solid_color.hlsl", NULL, NULL, "VSMain", "vs_5_0", 0, 0, &vertex_shader, &vertex_shader_err);
+    HRESULT vertex_res = D3DCompileFromFile(L".\\shaders\\debug_chunk.hlsl", NULL, NULL, "VSMain", "vs_5_0", 0, 0, &vertex_shader, &vertex_shader_err);
     if (vertex_shader_err) {
         OutputDebugStringA((char*)vertex_shader_err->GetBufferPointer());
     }
     ASSERT(SUCCEEDED(vertex_res));
 
-    HRESULT pixel_res = D3DCompileFromFile(L".\\shaders\\solid_color.hlsl", NULL, NULL, "PSMain", "ps_5_0", 0, 0, &pixel_shader, &pixel_shader_err);
+    HRESULT pixel_res = D3DCompileFromFile(L".\\shaders\\debug_chunk.hlsl", NULL, NULL, "PSMain", "ps_5_0", 0, 0, &pixel_shader, &pixel_shader_err);
     if (pixel_shader_err) {
         OutputDebugStringA((char*)pixel_shader_err->GetBufferPointer());
     }
@@ -400,7 +301,7 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context, b32 wirefr
 
     D3D12_RASTERIZER_DESC rasterizer_desc = {};
     rasterizer_desc.FillMode = wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-    rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
+    rasterizer_desc.CullMode = backface_culling ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
     rasterizer_desc.FrontCounterClockwise = true;
     rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
     rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
@@ -462,7 +363,6 @@ D3D12RenderPipeline initSolidColorPipeline(D3D12Context* d3d_context, b32 wirefr
 
 enum DrawOrderType {
     DRAW_ORDER_LOOK_AT,
-    DRAW_ORDER_DEBUG_CUBE,
     DRAW_ORDER_SOLID_PIPELINE,
     DRAW_ORDER_WIREFRAME_PIPELINE,
     DRAW_ORDER_DEBUG_MESH,
@@ -474,12 +374,6 @@ struct DrawOrderLookAt {
     f32 fov;
 };
 
-struct DrawOrderDebugCube {
-    v3 position;
-    v3 scale;
-    v4 color;
-};
-
 struct DrawOrderDebugMesh {
     v3 position;
 };
@@ -488,23 +382,14 @@ struct DrawOrder {
     DrawOrderType type;
     union {
         DrawOrderLookAt look_at;
-        DrawOrderDebugCube debug_cube;
         DrawOrderDebugMesh debug_mesh;
     };
 };
 
-void pushDebugCube(v3 position, v3 scale, v4 color) {
-    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_DEBUG_CUBE;
-    order->debug_cube.position = position;
-    order->debug_cube.scale = scale;
-    order->debug_cube.color = color;
-}
-
 void pushDebugMesh(v3 position) {
     DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
     order->type = DRAW_ORDER_DEBUG_MESH;
-    order->debug_cube.position = position;
+    order->debug_mesh.position = position;
 }
 
 void pushLookAtCamera(v3 eye, v3 target, f32 fov) {
@@ -526,6 +411,13 @@ void pushWireframePipeline() {
 }
 
 void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* solid_pipeline, D3D12RenderPipeline* wireframe_pipeline) {
+
+    // NOTE: reset the frame's command allocator and list, now that they are no
+    // longer in use
+    HRESULT alloc_reset = current_frame->command_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
 
     // indicate that the backbuffer needs to be available as a render target
     D3D12_RESOURCE_BARRIER render_barrier = {};
@@ -592,16 +484,6 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
                 m4 combined = proj * view;
                 current_frame->command_list->SetGraphicsRoot32BitConstants(2, 16, combined.data, 0);
             } break;
-            case DRAW_ORDER_DEBUG_CUBE: {
-                current_frame->command_list->IASetVertexBuffers(0, 1, &global_cube_vertex_buffer.view);
-                current_frame->command_list->SetGraphicsRoot32BitConstants(0, 4, order->debug_cube.color.data, 0);
-
-                m4 translation = makeTranslation(order->debug_cube.position);
-                m4 scale = makeScale(order->debug_cube.scale);
-                m4 combined = translation * scale;
-                current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, combined.data, 0);
-                current_frame->command_list->DrawInstanced(global_cube_vertex_buffer.count, 1, 0, 0);
-            } break;
             case DRAW_ORDER_DEBUG_MESH: {
                 current_frame->command_list->IASetVertexBuffers(0, 1, &global_debug_mesh_vertex_buffer.view);
                 v4 color = {1, 1, 1, 1};
@@ -644,37 +526,40 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
 }
 
 void debugUploadMeshBlocking(f32* data, usize size) {
-    // NOTE: VRAM heap and resource
-    D3D12_HEAP_PROPERTIES heap_props = {};
-    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
-    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    heap_props.CreationNodeMask = 1;
-    heap_props.VisibleNodeMask = 1;
 
-    D3D12_RESOURCE_DESC vertex_buffer_resource_desc = {};
-    vertex_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    vertex_buffer_resource_desc.Alignment = 0;
-    vertex_buffer_resource_desc.Width = size;          // this is the only field that really matters
-    vertex_buffer_resource_desc.Height = 1;
-    vertex_buffer_resource_desc.DepthOrArraySize = 1;
-    vertex_buffer_resource_desc.MipLevels = 1;
-    vertex_buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-    vertex_buffer_resource_desc.SampleDesc.Count = 1;
-    vertex_buffer_resource_desc.SampleDesc.Quality = 0;
-    vertex_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    vertex_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (!global_debug_mesh_vertex_buffer.buffer) {
+        // NOTE: Create VRAM buffer of worst-case size so it can be reused every time we
+        // want to update that single debug mesh.
+        D3D12_HEAP_PROPERTIES heap_props = {};
+        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
+        heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heap_props.CreationNodeMask = 1;
+        heap_props.VisibleNodeMask = 1;
 
-    ID3D12Resource* vertex_buffer;
-    HRESULT vbuffer_creation_res = global_d3d_context->device->CreateCommittedResource(
-        &heap_props,
-        D3D12_HEAP_FLAG_NONE,
-        &vertex_buffer_resource_desc,
-        D3D12_RESOURCE_STATE_COMMON,
-        NULL,
-        IID_PPV_ARGS(&vertex_buffer)
-    );
-    ASSERT(SUCCEEDED(vbuffer_creation_res));
+        D3D12_RESOURCE_DESC vertex_buffer_resource_desc = {};
+        vertex_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        vertex_buffer_resource_desc.Alignment = 0;
+        vertex_buffer_resource_desc.Width = (16 * 16 * 16) / 2 * 6 * 2 * 3 * sizeof(v3); // FIXME: magic numbers here
+        vertex_buffer_resource_desc.Height = 1;
+        vertex_buffer_resource_desc.DepthOrArraySize = 1;
+        vertex_buffer_resource_desc.MipLevels = 1;
+        vertex_buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+        vertex_buffer_resource_desc.SampleDesc.Count = 1;
+        vertex_buffer_resource_desc.SampleDesc.Quality = 0;
+        vertex_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        vertex_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        HRESULT vbuffer_creation_res = global_d3d_context->device->CreateCommittedResource(
+            &heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &vertex_buffer_resource_desc,
+            D3D12_RESOURCE_STATE_COMMON,
+            NULL,
+            IID_PPV_ARGS(&global_debug_mesh_vertex_buffer.buffer)
+        );
+        ASSERT(SUCCEEDED(vbuffer_creation_res));
+    }
 
     // NOTE: CPU-side heap used during upload
     D3D12_HEAP_PROPERTIES upload_heap_props = {};
@@ -684,7 +569,18 @@ void debugUploadMeshBlocking(f32* data, usize size) {
     upload_heap_props.CreationNodeMask = 1;
     upload_heap_props.VisibleNodeMask = 1;
 
-    D3D12_RESOURCE_DESC upload_heap_resource_desc = vertex_buffer_resource_desc;
+    D3D12_RESOURCE_DESC upload_heap_resource_desc = {};
+    upload_heap_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_heap_resource_desc.Alignment = 0;
+    upload_heap_resource_desc.Width = size; // This is the only field that really matters.
+    upload_heap_resource_desc.Height = 1;
+    upload_heap_resource_desc.DepthOrArraySize = 1;
+    upload_heap_resource_desc.MipLevels = 1;
+    upload_heap_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+    upload_heap_resource_desc.SampleDesc.Count = 1;
+    upload_heap_resource_desc.SampleDesc.Quality = 0;
+    upload_heap_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    upload_heap_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
     ID3D12Resource* upload_buffer;
     HRESULT upload_buffer_creation_res = global_d3d_context->device->CreateCommittedResource(
@@ -708,27 +604,37 @@ void debugUploadMeshBlocking(f32* data, usize size) {
     upload_buffer->Unmap(0, NULL); // Passing NULL as the write range because we wrote the entire buffer.
 
     // NOTE: This is horrible, but use the current frame's command buffer to begin the transfer.
-    // WARNING: This only works because we're waiting for the current frame's commands to be completed
+    // WARNING: This only works because we're waiting for the queued up commands to be completed
     // before calling gameUpdate, which we shouldn't do anyways. Use a separate command queue for uploads, maybe ?
     D3D12FrameContext* current_frame = &global_d3d_context->frames[global_d3d_context->current_frame_idx];
 
+    HRESULT alloc_reset = current_frame->command_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
+
     D3D12_RESOURCE_BARRIER to_copy_dest_barrier = {};
     to_copy_dest_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_copy_dest_barrier.Transition.pResource = vertex_buffer;
+    to_copy_dest_barrier.Transition.pResource = global_debug_mesh_vertex_buffer.buffer;
     to_copy_dest_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
     to_copy_dest_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
     to_copy_dest_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     current_frame->command_list->ResourceBarrier(1, &to_copy_dest_barrier);
 
-    current_frame->command_list->CopyBufferRegion(vertex_buffer, 0, upload_buffer, 0, size);
+    current_frame->command_list->CopyBufferRegion(global_debug_mesh_vertex_buffer.buffer, 0, upload_buffer, 0, size);
 
     D3D12_RESOURCE_BARRIER to_vertex_buffer_barrier = {};
     to_vertex_buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_vertex_buffer_barrier.Transition.pResource = vertex_buffer;
+    to_vertex_buffer_barrier.Transition.pResource = global_debug_mesh_vertex_buffer.buffer;
     to_vertex_buffer_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
     to_vertex_buffer_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
     to_vertex_buffer_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     current_frame->command_list->ResourceBarrier(1, &to_vertex_buffer_barrier);
+
+    // NOTE: close the command list and send it to the GPU for execution
+    HRESULT close_res = current_frame->command_list->Close();
+    ASSERT(SUCCEEDED(close_res));
+    global_d3d_context->command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&current_frame->command_list);
 
     // FIXME: obviously stalling the whole program during GPU upload is a bad idea
     global_d3d_context->command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
@@ -737,10 +643,11 @@ void debugUploadMeshBlocking(f32* data, usize size) {
         WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
     }
 
-    global_debug_mesh_vertex_buffer.view.BufferLocation = vertex_buffer->GetGPUVirtualAddress();
+    upload_buffer->Release();
+
+    global_debug_mesh_vertex_buffer.view.BufferLocation = global_debug_mesh_vertex_buffer.buffer->GetGPUVirtualAddress();
     global_debug_mesh_vertex_buffer.view.StrideInBytes = 3 * sizeof(f32);
     global_debug_mesh_vertex_buffer.view.SizeInBytes = size;
-
     global_debug_mesh_vertex_buffer.count = size / (3 * sizeof(f32));
 }
 
@@ -976,9 +883,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     D3D12Context d3d_context = initD3D12(window);
     global_d3d_context = &d3d_context;
-    D3D12RenderPipeline solid_color_pipeline = initSolidColorPipeline(&d3d_context, false);
-    D3D12RenderPipeline wireframe_pipeline = initSolidColorPipeline(&d3d_context, true);
-    global_cube_vertex_buffer = initDebugCube(&d3d_context);
+    D3D12RenderPipeline solid_color_pipeline = initDebugChunkPipeline(&d3d_context, false, true);
+    D3D12RenderPipeline wireframe_pipeline = initDebugChunkPipeline(&d3d_context, true, false);
 
     TimingInfo timing_info = initTimingInfo();
     GameMemory game_memory = {};
@@ -989,7 +895,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     GameCode game_code = {};
 
     PlatformAPI platform_api = {};
-    platform_api.pushDebugCube = pushDebugCube;
     platform_api.pushLookAtCamera = pushLookAtCamera;
     platform_api.pushSolidColorPipeline = pushSolidColorPipeline;
     platform_api.pushWireframePipeline = pushWireframePipeline;
@@ -1047,13 +952,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
             WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
         }
-
-        // NOTE: reset the frame's command allocator and list, now that they are no
-        // longer in use
-        HRESULT alloc_reset = current_frame->command_allocator->Reset();
-        ASSERT(SUCCEEDED(alloc_reset));
-        HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
-        ASSERT(SUCCEEDED(cmd_reset));
 
         // FIXME: move the game update to BEFORE the VSYNC wait, once the GPU async transfer stuff is prototyped
         if (game_code.is_valid) {

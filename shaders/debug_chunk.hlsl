@@ -24,7 +24,10 @@ VSOutput VSMain(float4 position : POSITION)
     VSOutput result;
 
     result.position = mul(camera, mul(model, position));
-    result.color = color;
+    result.color.r = color.r * (position.x / 16);
+    result.color.g = color.g * (position.y / 16);
+    result.color.b = color.b * (position.z / 16);
+    result.color.a = color.a;
 
     return result;
 }

@@ -2,6 +2,16 @@
 
 constexpr usize CHUNK_W = 16;
 
+struct Chunk {
+    u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
+     // NOTE: This is the worst case situation, with a checkboard chunk.
+     // I don't think there are any reason to keep the vertices around after
+     // the GPU upload, so this can be removed and get replaced by a shared buffer
+     // for transfers.
+    v3 vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2 * 3];
+    usize vertices_count;
+};
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -10,27 +20,117 @@ struct GameState {
     f32 camera_yaw;
     v3 player_position;
 
-    u32 chunk[CHUNK_W * CHUNK_W * CHUNK_W];
-    v3 chunk_vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2]; // this is the worst case situation, with a checkboard chunk
-    usize chunk_vertices_nb;
+    Chunk chunk;
 
     b32 is_wireframe;
 };
 
-void naiveMeshChunk(GameState* game_state) {
+// TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
+// Also look into switching to greedy meshing.
+void naiveMeshChunk(Chunk* chunk) {
     usize emitted = 0;
     for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-        usize y = (i / (CHUNK_W * CHUNK_W));
-        usize z = (i % (CHUNK_W * CHUNK_W)) / CHUNK_W;
+
         usize x = (i % CHUNK_W);
+        usize y = (i / CHUNK_W) % (CHUNK_W);
+        usize z = (i / (CHUNK_W * CHUNK_W));
+
+        if (!chunk->data[i]) continue;
+
+        b32 empty_pos_x = true;
+        b32 empty_neg_x = true;
+        b32 empty_pos_y = true;
+        b32 empty_neg_y = true;
+        b32 empty_pos_z = true;
+        b32 empty_neg_z = true;
+
+        if (x < (CHUNK_W - 1)) {
+            empty_pos_x = !chunk->data[i + 1];
+        }
+        if (x > 0) {
+            empty_neg_x = !chunk->data[i - 1];
+        }
+
+        if (y < (CHUNK_W - 1)) {
+            empty_pos_y = !chunk->data[i + CHUNK_W];
+        }
+        if (y > 0) {
+            empty_neg_y = !chunk->data[i - CHUNK_W];
+        }
+
+        if (z < (CHUNK_W - 1)) {
+            empty_pos_z = !chunk->data[i + CHUNK_W * CHUNK_W];
+        }
+        if (z > 0) {
+            empty_neg_z = !chunk->data[i - CHUNK_W * CHUNK_W];
+        }
 
         v3 position = {(f32)x, (f32)y, (f32)z};
-        game_state->chunk_vertices[emitted++] = position;
-        game_state->chunk_vertices[emitted++] = position + v3 {0, 0, 1};
-        game_state->chunk_vertices[emitted++] = position + v3 {1, 0, 0};
+
+        if (empty_pos_x) {
+            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+        }
+
+        if (empty_neg_x) {
+            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
+
+            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+        }
+
+        if (empty_pos_y) {
+            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+
+            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+        }
+
+        if (empty_neg_y) {
+            chunk->vertices[emitted++] = position;
+            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+
+            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+        }
+
+        if (empty_pos_z) {
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
+
+            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
+            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+        }
+
+        if (empty_neg_z) {
+            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
+
+            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
+            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
+            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+        }
     }
 
-    game_state->chunk_vertices_nb = emitted;
+    chunk->vertices_count = emitted;
+
+    ASSERT(chunk->vertices_count <= ARRAY_COUNT(chunk->vertices));
 }
 
 extern "C"
@@ -39,19 +139,19 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     GameState* game_state = (GameState*)memory->permanent_storage;
 
     if(!memory->is_initialized) {
-        game_state->player_position = {0, 5, 8};
+        game_state->player_position = {0, 5, -5};
         game_state->time = 0;
         game_state->camera_yaw = 3 * PI32 / 2;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
         for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
             if (randomNextU32(&game_state->random_series) % 2) {
-                game_state->chunk[i] = 1;
+                game_state->chunk.data[i] = 1;
             }
         }
 
-        naiveMeshChunk(game_state);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk_vertices, game_state->chunk_vertices_nb * sizeof(v3));
+        naiveMeshChunk(&game_state->chunk);
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
 
         memory->is_initialized = true;
     }
@@ -105,24 +205,14 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     } else {
         platform_api->pushSolidColorPipeline();
     }
+
+    // TODO: this is just to test if mesh updating works
+    {
+        naiveMeshChunk(&game_state->chunk);
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
+    }
+
     platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 
-    /*
-    for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-        if (!game_state->chunk[i]) continue;
-
-        usize y = (i / (CHUNK_W * CHUNK_W));
-        usize z = (i % (CHUNK_W * CHUNK_W)) / CHUNK_W;
-        usize x = (i % CHUNK_W);
-
-        v3 position = {(f32)x, (f32)y, (f32)z};
-        f32 y_color = (f32)y / CHUNK_W;
-        f32 z_color = (f32)z / CHUNK_W;
-        f32 x_color = (f32)x / CHUNK_W;
-        v4 color = {x_color, y_color, z_color, 1.0};
-
-        platform_api->pushDebugCube(position, v3 {1, 1, 1}, color);
-    }
-    */
     platform_api->pushDebugMesh(v3 {0, 0, 0});
 }
