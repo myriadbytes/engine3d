@@ -1,5 +1,7 @@
 # Handmade Voxel Game
 
+![](images/header_small.gif)
+
 This repository contains the code for a C++ 3D voxel game. The project is inspired by Casey Muratori's [Handmade Hero](https://hero.handmade.network/) series, whose goal is to write a complete video game _from scratch_ without relying on any third party dependencies or the C/C++ standard library.
 
 The Windows platform layer uses:
@@ -22,7 +24,7 @@ Running the `build.py` file should just work, provided you have `clang.exe` on y
 ### Engine:
 - [x] Game code hot-reloading
 - [x] Keyboard & controller input processing (using the Windows 10+ GameInput lib)
-- [x] Generating `compile_commands.json` inside the build script
+- [x] Generating `compile_commands.json` inside the build scripta
 - [ ] Swapchain resizing
 - [ ] Sound output (WASAPI ?)
 - [ ] Save states (like an emulator)
