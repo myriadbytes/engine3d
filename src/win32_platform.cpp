@@ -867,7 +867,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        /* position & size */ CW_USEDEFAULT, CW_USEDEFAULT, 600, 600,
+        /* position & size */ CW_USEDEFAULT, CW_USEDEFAULT, 800, 800,
         /* parent window */ NULL,
         /* menu */ NULL,
         hInstance,

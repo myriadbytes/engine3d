@@ -133,6 +133,118 @@ void naiveMeshChunk(Chunk* chunk) {
     ASSERT(chunk->vertices_count <= ARRAY_COUNT(chunk->vertices));
 }
 
+b32 raycast_aabb(v3 ray_origin, v3 ray_direction, v3 bb_min, v3 bb_max, v3* out_intersection) {
+    // NOTE: Original algorithm from here:
+    // https://tavianator.com/2011/ray_box.html
+    f32 tmin = -INFINITY;
+    f32 tmax = INFINITY;
+
+    // TODO: The original blog post suggests using SSE2's min and max instructions
+    // as an easy optimization.
+
+    if (ray_direction.x != 0.0f) {
+        f32 tx1 = (bb_min.x - ray_origin.x)/ray_direction.x;
+        f32 tx2 = (bb_max.x - ray_origin.x)/ray_direction.x;
+
+        tmin = max(tmin, min(tx1, tx2));
+        tmax = min(tmax, max(tx1, tx2));
+    }
+
+    if (ray_direction.y != 0.0f) {
+        f32 ty1 = (bb_min.y - ray_origin.y)/ray_direction.y;
+        f32 ty2 = (bb_max.y - ray_origin.y)/ray_direction.y;
+
+        tmin = max(tmin, min(ty1, ty2));
+        tmax = min(tmax, max(ty1, ty2));
+    }
+
+    if (ray_direction.z != 0.0f) {
+        f32 tz1 = (bb_min.z - ray_origin.z)/ray_direction.z;
+        f32 tz2 = (bb_max.z - ray_origin.z)/ray_direction.z;
+
+        tmin = max(tmin, min(tz1, tz2));
+        tmax = min(tmax, max(tz1, tz2));
+    }
+
+    if (tmax < tmin || tmin <= 0.0f) {
+        return false;
+    }
+
+    *out_intersection = ray_origin + ray_direction * tmin;
+    return true;
+}
+
+inline b32 point_inclusion_aabb(v3 point, v3 bb_min, v3 bb_max) {
+    return point.x >= bb_min.x && point.x <= bb_max.x
+        && point.y >= bb_min.y && point.y <= bb_max.y
+        && point.z >= bb_min.z && point.z <= bb_max.z;
+}
+
+// NOTE: Classic Amanatides & Woo algorithm.
+// http://www.cse.yorku.ca/~amana/research/grid.pdf
+// The traversal origin needs to be on the boundary or inside the chunk already,
+// and in chunk-relative coordinates. That first part should not be a problem in
+// the final game since the whole world will be filled with chunks, but for now
+// we raycast with the single debug chunk before calling this function.
+b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_direction, usize* out_i) {
+
+    // FIXME: This assertion to check if the origin is in chunk-relative coordinates sometimes fires
+    // because one of the components is -0.000001~. This could just be expected precision issues with
+    // the chunk bounding box raycast function.
+    // ASSERT(point_inclusion_aabb(traversal_origin, v3 {0, 0, 0}, v3 {CHUNK_W, CHUNK_W, CHUNK_W}));
+
+    i32 x, y, z;
+    x = (i32)(traversal_origin.x);
+    y = (i32)(traversal_origin.y);
+    z = (i32)(traversal_origin.z);
+
+    // NOTE: If the ray origin is on a positive boundary, the truncation
+    // will create x/y/z = 16 ("first block of neighboring chunk") instead
+    // of x/y/z = 15 ("last block of this chunk") so we need to correct this.
+    if (traversal_origin.x == (f32)CHUNK_W) x--;
+    if (traversal_origin.y == (f32)CHUNK_W) y--;
+    if (traversal_origin.z == (f32)CHUNK_W) z--;
+
+    i32 step_x = traversal_direction.x > 0.0 ? 1 : -1;
+    i32 step_y = traversal_direction.y > 0.0 ? 1 : -1;
+    i32 step_z = traversal_direction.z > 0.0 ? 1 : -1;
+
+    f32 t_max_x = ((step_x > 0.0) ? ((f32)x + 1 - traversal_origin.x) : (traversal_origin.x - (f32)x)) / fabsf(traversal_direction.x);
+    f32 t_max_y = ((step_y > 0.0) ? ((f32)y + 1 - traversal_origin.y) : (traversal_origin.y - (f32)y)) / fabsf(traversal_direction.y);
+    f32 t_max_z = ((step_z > 0.0) ? ((f32)z + 1 - traversal_origin.z) : (traversal_origin.z - (f32)z)) / fabsf(traversal_direction.z);
+
+    f32 t_delta_x = 1.0 / fabs(traversal_direction.x);
+    f32 t_delta_y = 1.0 / fabs(traversal_direction.y);
+    f32 t_delta_z = 1.0 / fabs(traversal_direction.z);
+
+    while (x >= 0 && x < CHUNK_W && y >= 0 && y < CHUNK_W && z >= 0 && z < CHUNK_W) {
+        if (chunk->data[x + CHUNK_W * y + CHUNK_W * CHUNK_W * z]) {
+            *out_i = x + CHUNK_W * y + CHUNK_W * CHUNK_W * z;
+            return true;
+        }
+
+        if (t_max_x < t_max_y) {
+            if (t_max_x < t_max_z) {
+                x += step_x;
+                t_max_x += t_delta_x;
+            } else {
+                z += step_z;
+                t_max_z += t_delta_z;
+            }
+        } else {
+            if (t_max_y < t_max_z) {
+                y += step_y;
+                t_max_y += t_delta_y;
+            } else {
+                z += step_z;
+                t_max_z += t_delta_z;
+            }
+        }
+    }
+
+    return false;
+}
+
 extern "C"
 void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
     ASSERT(memory->permanent_storage_size >= sizeof(GameState));
@@ -200,17 +312,39 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
         game_state->is_wireframe = !game_state->is_wireframe;
     }
 
+    // NOTE: If the player is not inside the debug chunk, we need to find the closest
+    // point along the ray that is inside the chunk in order to begin the voxel traversal.
+    b32 should_remove_block = input->kb.keys[SCANCODE_SPACE].is_down;
+    v3 traversal_origin;
+
+    v3 chunk_bb_min = {0, 0, 0};
+    v3 chunk_bb_max = {CHUNK_W, CHUNK_W, CHUNK_W};
+
+    if (point_inclusion_aabb(game_state->player_position, chunk_bb_min, chunk_bb_max)) {
+        traversal_origin = game_state->player_position;
+    } else {
+        should_remove_block = should_remove_block && raycast_aabb(game_state->player_position, camera_forward, chunk_bb_min, chunk_bb_max, &traversal_origin);
+    }
+
+    usize block_idx;
+    if (should_remove_block && raycast_chunk_traversal(&game_state->chunk, traversal_origin, camera_forward, &block_idx)) {
+        game_state->chunk.data[block_idx] = 0;
+        naiveMeshChunk(&game_state->chunk);
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
+    }
+
     if (game_state->is_wireframe) {
         platform_api->pushWireframePipeline();
     } else {
         platform_api->pushSolidColorPipeline();
     }
 
-    // TODO: this is just to test if mesh updating works
-    {
-        naiveMeshChunk(&game_state->chunk);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
-    }
+    // NOTE: Remove a random block every frame, just to stress test the meshing + GPU upload.
+    //{
+    //    game_state->chunk.data[randomNextU32(&game_state->random_series) % ARRAY_COUNT(game_state->chunk.data)] = 0;
+    //    naiveMeshChunk(&game_state->chunk);
+    //    platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
+    //}
 
     platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 

@@ -12,8 +12,9 @@ TO-DO ENGINE:
 - Generate a `compile_commands.json` inside the build script (easier than it sounds)
 
 TO-DO GAME:
-- Chunk streaming system
-- Chunk meshing
+- Chunk data streaming system
+- Greedy meshing
+- Asynchronous GPU transfer for the meshes
 
 PROTOTYPED :
 - Code hot-reloading

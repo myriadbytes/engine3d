@@ -11,6 +11,8 @@ struct GameMemory {
 
 void debugUploadMeshBlocking(f32* data, usize size);
 
+// NOTE: This is not a good abstraction AT ALL, but it's gonna
+// get refined over time.
 void pushSolidColorPipeline();
 void pushWireframePipeline();
 void pushDebugMesh(v3 position);

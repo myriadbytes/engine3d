@@ -176,6 +176,39 @@ inline v3 operator* (v3 a, f32 scalar) {
     return scalar * a;
 }
 
+inline v3 operator* (v3 a, v3 b) {
+    // element-wise product, like in GLSL
+    v3 result;
+    result.x = a.x * b.x;
+    result.y = a.y * b.y;
+    result.z = a.z * b.z;
+    return result;
+}
+
+inline v2 operator/ (f32 scalar, v2 a) {
+    v2 result;
+    result.x = scalar / a.x;
+    result.y = scalar / a.y;
+    return result;
+}
+
+inline v3 operator/ (f32 scalar, v3 a) {
+    v3 result;
+    result.x = scalar / a.x;
+    result.y = scalar / a.y;
+    result.z = scalar / a.z;
+    return result;
+}
+
+inline v4 operator/ (f32 scalar, v4 a) {
+    v4 result;
+    result.x = scalar / a.x;
+    result.y = scalar / a.y;
+    result.z = scalar / a.z;
+    result.w = scalar / a.w;
+    return result;
+}
+
 inline v4 operator* (f32 scalar, v4 a) {
     v4 result;
     result.x = a.x * scalar;
@@ -229,6 +262,22 @@ inline v3 cross(v3 a, v3 b) {
     result.y = a.z * b.x - a.x * b.z;
     result.z = a.x * b.y - a.y * b.x;
     return result;
+}
+
+inline v3 abs(v3 a) {
+    v3 result;
+    result.x = fabsf(a.x);
+    result.y = fabsf(a.y);
+    result.z = fabsf(a.z);
+    return result;
+}
+
+inline f32 max(f32 a, f32 b) {
+    return b > a ? b : a;
+}
+
+inline f32 min(f32 a, f32 b) {
+    return b < a ? b : a;
 }
 
 // NOTE: "Columns" here is used in the traditional sense, as you would see in a math textbook.
