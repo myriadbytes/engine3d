@@ -1,4 +1,7 @@
 build/
 .zed/
 *.raddbg
+
 .clangd
+.cache
+compile_commands.json

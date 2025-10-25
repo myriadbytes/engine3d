@@ -10,6 +10,7 @@ compiler_flags = ["-g", "-fdiagnostics-absolute-paths", "-Wall", "-Wno-missing-b
 linker_flags = [""]
 syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "GameInput.lib"]
 game_dll_exports = ["gameUpdate"]
+generate_compile_commands = True
 
 # FILES
 platform_source_files = ["src/win32_platform.cpp"]
@@ -102,7 +103,29 @@ if len(game_result.stderr) > 0:
     # WINDOWS LINKER ERRORS
     print(game_result.stdout.strip())
 
-    # OUTPUT
+# COMPILE_COMMANDS.JSON
+if generate_compile_commands:
+    compile_commands = ""
+    compile_commands += "[\n"
+
+    all_source_files = platform_source_files + game_source_files + common_source_files
+    for i, file in enumerate(all_source_files):
+        compile_commands += "{\n"
+
+        compile_commands += f'"directory": "{str(project_dir).replace("\\", "/")}",\n'
+        compile_commands += f'"command": "clang {defines_str} {compiler_flags_str} -c {str(project_dir / file).replace("\\", "/")}"\n,'
+        compile_commands += f'"file": "{file}"\n'
+
+        compile_commands += "}"
+        if i != len(all_source_files) - 1:
+            compile_commands += ","
+        compile_commands += "\n"
+
+    compile_commands += "]"
+
+    _ = Path(project_dir / "compile_commands.json").write_text(compile_commands)
+
+# OUTPUT
 if platform_success and game_success:
     print("BUILD SUCCESS")
     exit(0)
