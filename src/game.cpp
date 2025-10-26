@@ -2,13 +2,18 @@
 
 constexpr usize CHUNK_W = 16;
 
+struct ChunkVertex {
+    v3 position;
+    v3 normal;
+};
+
 struct Chunk {
     u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
      // NOTE: This is the worst case situation, with a checkboard chunk.
      // I don't think there are any reason to keep the vertices around after
      // the GPU upload, so this can be removed and get replaced by a shared buffer
      // for transfers.
-    v3 vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2 * 3];
+    ChunkVertex vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2 * 3];
     usize vertices_count;
 };
 
@@ -68,63 +73,64 @@ void naiveMeshChunk(Chunk* chunk) {
         v3 position = {(f32)x, (f32)y, (f32)z};
 
         if (empty_pos_x) {
-            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
 
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
         }
 
         if (empty_neg_x) {
-            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {-1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
 
-            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {-1, 0, 0}};
         }
 
         if (empty_pos_y) {
-            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
 
-            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
         }
 
         if (empty_neg_y) {
-            chunk->vertices[emitted++] = position;
-            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, -1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
 
-            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, -1, 0}};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
+
         }
 
         if (empty_pos_z) {
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, 0, 1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
 
-            chunk->vertices[emitted++] = position + v3 {0, 0, 1};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 1};
-            chunk->vertices[emitted++] = position + v3 {0, 1, 1};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 0, 1}};
         }
 
         if (empty_neg_z) {
-            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 0, 0};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, 0, -1}};
 
-            chunk->vertices[emitted++] = position + v3 {0, 0, 0};
-            chunk->vertices[emitted++] = position + v3 {0, 1, 0};
-            chunk->vertices[emitted++] = position + v3 {1, 1, 0};
+            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
+            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 0, -1}};
+            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
         }
     }
 
@@ -257,13 +263,13 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
         for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-            if (randomNextU32(&game_state->random_series) % 2) {
+            if (randomNextU32(&game_state->random_series) % 2 == 0) {
                 game_state->chunk.data[i] = 1;
             }
         }
 
         naiveMeshChunk(&game_state->chunk);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(ChunkVertex));
 
         memory->is_initialized = true;
     }
@@ -330,7 +336,7 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     if (should_remove_block && raycast_chunk_traversal(&game_state->chunk, traversal_origin, camera_forward, &block_idx)) {
         game_state->chunk.data[block_idx] = 0;
         naiveMeshChunk(&game_state->chunk);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
+        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(ChunkVertex));
     }
 
     if (game_state->is_wireframe) {

@@ -297,6 +297,7 @@ D3D12RenderPipeline initDebugChunkPipeline(D3D12Context* d3d_context, b32 wirefr
     // NOTE : pipeline stages config
     D3D12_INPUT_ELEMENT_DESC input_descriptions[] = {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
     D3D12_RASTERIZER_DESC rasterizer_desc = {};
@@ -540,7 +541,7 @@ void debugUploadMeshBlocking(f32* data, usize size) {
         D3D12_RESOURCE_DESC vertex_buffer_resource_desc = {};
         vertex_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         vertex_buffer_resource_desc.Alignment = 0;
-        vertex_buffer_resource_desc.Width = (16 * 16 * 16) / 2 * 6 * 2 * 3 * sizeof(v3); // FIXME: magic numbers here
+        vertex_buffer_resource_desc.Width = (16 * 16 * 16) / 2 * 6 * 2 * 6 * sizeof(v3); // FIXME: magic numbers here
         vertex_buffer_resource_desc.Height = 1;
         vertex_buffer_resource_desc.DepthOrArraySize = 1;
         vertex_buffer_resource_desc.MipLevels = 1;
@@ -645,10 +646,11 @@ void debugUploadMeshBlocking(f32* data, usize size) {
 
     upload_buffer->Release();
 
+    // FIXME: magic numbers
     global_debug_mesh_vertex_buffer.view.BufferLocation = global_debug_mesh_vertex_buffer.buffer->GetGPUVirtualAddress();
-    global_debug_mesh_vertex_buffer.view.StrideInBytes = 3 * sizeof(f32);
+    global_debug_mesh_vertex_buffer.view.StrideInBytes = 6 * sizeof(f32);
     global_debug_mesh_vertex_buffer.view.SizeInBytes = size;
-    global_debug_mesh_vertex_buffer.count = size / (3 * sizeof(f32));
+    global_debug_mesh_vertex_buffer.count = size / (6 * sizeof(f32));
 }
 
 struct TimingInfo {

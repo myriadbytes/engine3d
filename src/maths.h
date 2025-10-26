@@ -185,30 +185,6 @@ inline v3 operator* (v3 a, v3 b) {
     return result;
 }
 
-inline v2 operator/ (f32 scalar, v2 a) {
-    v2 result;
-    result.x = scalar / a.x;
-    result.y = scalar / a.y;
-    return result;
-}
-
-inline v3 operator/ (f32 scalar, v3 a) {
-    v3 result;
-    result.x = scalar / a.x;
-    result.y = scalar / a.y;
-    result.z = scalar / a.z;
-    return result;
-}
-
-inline v4 operator/ (f32 scalar, v4 a) {
-    v4 result;
-    result.x = scalar / a.x;
-    result.y = scalar / a.y;
-    result.z = scalar / a.z;
-    result.w = scalar / a.w;
-    return result;
-}
-
 inline v4 operator* (f32 scalar, v4 a) {
     v4 result;
     result.x = a.x * scalar;
