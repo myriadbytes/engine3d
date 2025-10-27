@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "input.h"
+#include "gpu.h"
 
 struct GameMemory {
     bool  is_initialized;
@@ -9,29 +10,26 @@ struct GameMemory {
     void* permanent_storage; // NOTE: guaranteed to be filled with zeros at init
 };
 
-void debugUploadMeshBlocking(f32* data, usize size);
+//void debugUploadMeshBlocking(f32* data, usize size);
 
 // NOTE: This is not a good abstraction AT ALL, but it's gonna
 // get refined over time.
-void pushSolidColorPipeline();
-void pushWireframePipeline();
-void pushDebugMesh(v3 position);
-void pushLookAtCamera(v3 eye, v3 target, f32 fov);
+//void pushSolidColorPipeline();
+//void pushWireframePipeline();
+//void pushDebugMesh(v3 position);
+//void pushLookAtCamera(v3 eye, v3 target, f32 fov);
 
 struct PlatformAPI {
-    decltype(debugUploadMeshBlocking)* debugUploadMeshBlocking;
-    decltype(pushDebugMesh)* pushDebugMesh;
-
-    decltype(pushLookAtCamera)* pushLookAtCamera;
-    decltype(pushSolidColorPipeline)* pushSolidColorPipeline;
-    decltype(pushWireframePipeline)* pushWireframePipeline;
-};
-
-struct TestMatrices {
-    m4 model;
-    m4 camera;
+    decltype(createUploadBuffer)* createUploadBuffer;
+    decltype(createGPUBuffer)* createGPUBuffer;
+    decltype(mapUploadBuffer)* mapUploadBuffer;
+    decltype(unmapUploadBuffer)* unmapUploadBuffer;
+    decltype(blockingUploadToGPUBuffer)* blockingUploadToGPUBuffer;
+    decltype(waitForCommandBuffer)* waitForCommandBuffer;
+    decltype(sendCommandBufferAndPresent)* sendCommandBufferAndPresent;
+    decltype(recordClearCommand)* recordClearCommand;
 };
 
 // TODO: should we pass the function pointers every frame ?
 extern "C"
-void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input);
+void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, GameMemory* memory, InputState* input);

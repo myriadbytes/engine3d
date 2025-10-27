@@ -2,7 +2,7 @@
 
 ![](images/header_small.gif)
 
-This repository contains the code for a C++ 3D voxel game. The project is inspired by Casey Muratori's [Handmade Hero](https://hero.handmade.network/) series, whose goal is to write a complete video game _from scratch_ without relying on any third party dependencies or the C/C++ standard library.
+This repository contains the code for a (C-style) C++ 3D voxel game. The project is inspired by Casey Muratori's [Handmade Hero](https://hero.handmade.network/) series, whose goal is to write a complete video game _from scratch_ without relying on any third party dependencies or the C/C++ standard library.
 
 The Windows platform layer uses:
 - Win32 API
@@ -17,6 +17,9 @@ Because it's fun ! Writing a complete codebase is also a great learning exercise
 
 ## How to build:
 
+Making everything from scratch also implies not relying on tools like CMake to handle the build process. This is thankfully much easier
+without dependencies to manage : the build script even generates a `compile_commands.json` file, so you get complete LSP functionality in your favorite
+`clangd`-compatible editor !
 Running the `build.py` file should just work, provided you have `clang.exe` on your PATH. You can then just run `build/win32_game.exe`.
 
 ## Game code hot-reloading:

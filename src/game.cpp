@@ -2,6 +2,9 @@
 
 constexpr usize CHUNK_W = 16;
 
+// NOTE: This is the worst case number of vertices that would be needed for a chunk mesh (with a "checkerboard" chunk).
+constexpr usize WORST_CASE_CHUNK_VERTICES = ((CHUNK_W * CHUNK_W * CHUNK_W) / 2) * 6 * 2 * 3;
+
 struct ChunkVertex {
     v3 position;
     v3 normal;
@@ -9,30 +12,11 @@ struct ChunkVertex {
 
 struct Chunk {
     u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
-     // NOTE: This is the worst case situation, with a checkboard chunk.
-     // I don't think there are any reason to keep the vertices around after
-     // the GPU upload, so this can be removed and get replaced by a shared buffer
-     // for transfers.
-    ChunkVertex vertices[(CHUNK_W * CHUNK_W * CHUNK_W) / 2 * 6 * 2 * 3];
-    usize vertices_count;
-};
-
-struct GameState {
-    f32 time;
-    RandomSeries random_series;
-
-    f32 camera_pitch;
-    f32 camera_yaw;
-    v3 player_position;
-
-    Chunk chunk;
-
-    b32 is_wireframe;
 };
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
 // Also look into switching to greedy meshing.
-void naiveMeshChunk(Chunk* chunk) {
+void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count) {
     usize emitted = 0;
     for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
 
@@ -73,70 +57,68 @@ void naiveMeshChunk(Chunk* chunk) {
         v3 position = {(f32)x, (f32)y, (f32)z};
 
         if (empty_pos_x) {
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
 
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {1, 0, 0}};
         }
 
         if (empty_neg_x) {
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {-1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
 
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {-1, 0, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {-1, 0, 0}};
         }
 
         if (empty_pos_y) {
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
 
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 1, 0}};
         }
 
         if (empty_neg_y) {
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, -1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
 
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, -1, 0}};
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, -1, 0}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, -1, 0}};
 
         }
 
         if (empty_pos_z) {
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, 0, 1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
 
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 1}, v3 {0, 0, 1}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 1}, v3 {0, 0, 1}};
         }
 
         if (empty_neg_z) {
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {1, 0, 0}, v3 {0, 0, -1}};
 
-            chunk->vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
-            chunk->vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 0, -1}};
-            chunk->vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {0, 0, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {0, 1, 0}, v3 {0, 0, -1}};
+            out_vertices[emitted++] = {position + v3 {1, 1, 0}, v3 {0, 0, -1}};
         }
     }
 
-    chunk->vertices_count = emitted;
-
-    ASSERT(chunk->vertices_count <= ARRAY_COUNT(chunk->vertices));
+    *out_generated_vertex_count = emitted;
 }
 
 b32 raycast_aabb(v3 ray_origin, v3 ray_direction, v3 bb_min, v3 bb_max, v3* out_intersection) {
@@ -251,16 +233,62 @@ b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_dire
     return false;
 }
 
+void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* chunk, GPU_UploadBuffer* upload_buffer, GPU_Buffer* vertex_buffer) {
+
+    // NOTE: generate directly in the mapped upload buffer
+    ChunkVertex* buffer = (ChunkVertex*) platform_api->mapUploadBuffer(gpu_context, upload_buffer);
+    usize generated_vertex_count;
+
+    generateNaiveChunkMesh(chunk, buffer, &generated_vertex_count);
+
+    platform_api->unmapUploadBuffer(gpu_context, upload_buffer);
+    // TODO: add a way to check that the number of generated vertices is not bigger than the upload and vertex buffers
+
+    platform_api->blockingUploadToGPUBuffer(gpu_context, upload_buffer, vertex_buffer, generated_vertex_count * sizeof(ChunkVertex));
+}
+
+struct GameState {
+    f32 time;
+    RandomSeries random_series;
+
+    f32 camera_pitch;
+    f32 camera_yaw;
+    v3 player_position;
+
+    Chunk chunk;
+    GPU_UploadBuffer* chunk_upload_buffer;
+    GPU_Buffer* chunk_vertex_buffer;
+
+    b32 is_wireframe;
+
+    u8 static_arena_memory[MEGABYTES(2)];
+    Arena static_arena;
+
+    u8 frame_arena_memory[MEGABYTES(2)];
+    Arena frame_arena;
+};
+
 extern "C"
-void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
+void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
     ASSERT(memory->permanent_storage_size >= sizeof(GameState));
     GameState* game_state = (GameState*)memory->permanent_storage;
 
+    // INITIALIZATION
     if(!memory->is_initialized) {
+        game_state->static_arena.base = game_state->static_arena_memory;
+        game_state->static_arena.capacity = ARRAY_COUNT(game_state->static_arena_memory);
+
+        game_state->frame_arena.base = game_state->frame_arena_memory;
+        game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
+
         game_state->player_position = {0, 5, -5};
         game_state->time = 0;
         game_state->camera_yaw = 3 * PI32 / 2;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
+
+        // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
+        game_state->chunk_upload_buffer = platform_api->createUploadBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), &game_state->static_arena);
+        game_state->chunk_vertex_buffer = platform_api->createGPUBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), GPU_BUFFER_USAGE_VERTEX, &game_state->static_arena);
 
         for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
             if (randomNextU32(&game_state->random_series) % 2 == 0) {
@@ -268,12 +296,12 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
             }
         }
 
-        naiveMeshChunk(&game_state->chunk);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(ChunkVertex));
+        refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
 
         memory->is_initialized = true;
     }
 
+    // SIMULATION
     game_state->time += dt;
 
     f32 sensitivity = 0.01;
@@ -335,24 +363,24 @@ void gameUpdate(f32 dt, PlatformAPI* platform_api, GameMemory* memory, InputStat
     usize block_idx;
     if (should_remove_block && raycast_chunk_traversal(&game_state->chunk, traversal_origin, camera_forward, &block_idx)) {
         game_state->chunk.data[block_idx] = 0;
-        naiveMeshChunk(&game_state->chunk);
-        platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(ChunkVertex));
+        refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
     }
+
+    // RENDERING
+    GPU_CommandBuffer* cmd_buf = platform_api->waitForCommandBuffer(gpu_context, &game_state->frame_arena);
+    f32 clear_color[] = {0.9, 0, 0.1, 1};
+    platform_api->recordClearCommand(gpu_context, cmd_buf, clear_color);
+    platform_api->sendCommandBufferAndPresent(gpu_context, cmd_buf);
 
     if (game_state->is_wireframe) {
-        platform_api->pushWireframePipeline();
+        //platform_api->pushWireframePipeline();
     } else {
-        platform_api->pushSolidColorPipeline();
+        //platform_api->pushSolidColorPipeline();
     }
 
-    // NOTE: Remove a random block every frame, just to stress test the meshing + GPU upload.
-    //{
-    //    game_state->chunk.data[randomNextU32(&game_state->random_series) % ARRAY_COUNT(game_state->chunk.data)] = 0;
-    //    naiveMeshChunk(&game_state->chunk);
-    //    platform_api->debugUploadMeshBlocking((f32*)game_state->chunk.vertices, game_state->chunk.vertices_count * sizeof(v3));
-    //}
+    //platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
 
-    platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
+    //platform_api->pushDebugMesh(v3 {0, 0, 0});
 
-    platform_api->pushDebugMesh(v3 {0, 0, 0});
+    clearArena(&game_state->frame_arena);
 }

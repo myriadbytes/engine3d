@@ -6,14 +6,20 @@ import shutil
 exe_name = "win32_game.exe"
 game_dll_name = "game.dll"
 defines = {"ENGINE_SLOW": "1", "ENGINE_INTERNAL": "1"}
-compiler_flags = ["-g", "-fdiagnostics-absolute-paths", "-Wall", "-Wno-missing-braces"]
+compiler_flags = [
+    "-g",
+    "-fdiagnostics-absolute-paths",
+    "-Wall",
+    "-Wno-missing-braces",
+    "-std=c++17",
+]
 linker_flags = [""]
 syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "GameInput.lib"]
 game_dll_exports = ["gameUpdate"]
 generate_compile_commands = True
 
 # FILES
-platform_source_files = ["src/win32_platform.cpp"]
+platform_source_files = ["src/win32_platform.cpp", "src/win32_gpu.cpp"]
 game_source_files = ["src/game.cpp"]
 common_source_files = ["src/arena.cpp", "src/maths.cpp"]
 

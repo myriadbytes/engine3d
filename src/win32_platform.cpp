@@ -1,25 +1,20 @@
+#define NOMINMAX
 #include <Windows.h>
+
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
 #include <strsafe.h>
 #include "../firstparty/Microsoft/include/GameInput.h"
 
-// NOTE: windows.h defines those names...
-#undef near
-#undef far
-#undef min
-#undef max
-
 using namespace GameInput::v3;
 
 #include "common.h"
 #include "input.h"
 #include "game_api.h"
-#include "arena.h"
+#include "win32_gpu.h"
 
 global b32 global_running = false;
-global Arena global_draw_orders_arena = {};
 
 // NOTE: due to the way Microsoft's GameInput works, we need to keep
 // more state around than what we want to present to the user
@@ -29,32 +24,7 @@ struct WindowsInputState {
     i64 mouse_accumulated_y;
 };
 
-struct D3D12FrameContext {
-    ID3D12CommandAllocator* command_allocator;
-    ID3D12GraphicsCommandList* command_list;
-    ID3D12Fence* fence;
-    HANDLE fence_wait_event;
-    u64 fence_ready_value;
-};
-
-constexpr u32 FRAMES_IN_FLIGHT = 2;
-struct D3D12Context {
-    ID3D12Debug* debug_interface;
-    ID3D12Device* device;
-    ID3D12CommandQueue* command_queue;
-    IDXGISwapChain3* swapchain;
-    ID3D12DescriptorHeap* rtv_heap;
-    u32 rtv_descriptor_size;
-    ID3D12Resource* render_target_resources[FRAMES_IN_FLIGHT];
-    ID3D12DescriptorHeap* dsv_heap;
-    u32 dsv_descriptor_size;
-    ID3D12Resource* depth_target_resources[FRAMES_IN_FLIGHT];
-    D3D12FrameContext frames[FRAMES_IN_FLIGHT];
-    u32 current_frame_idx;
-};
-
-global D3D12Context* global_d3d_context = {};
-
+/*
 struct D3D12RenderPipeline {
     ID3D12RootSignature* root_signature;
     ID3D12PipelineState* pipeline_state;
@@ -65,174 +35,6 @@ struct D3D12VertexBuffer {
     D3D12_VERTEX_BUFFER_VIEW view;
     u32 count;
 };
-
-global D3D12VertexBuffer global_debug_mesh_vertex_buffer;
-
-D3D12Context initD3D12(HWND window_handle) {
-    D3D12Context context = {};
-
-    // FIXME: release all the COM objects
-    HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
-    ASSERT(SUCCEEDED(debug_res));
-    context.debug_interface->EnableDebugLayer();
-
-    IDXGIFactory4* factory;
-    HRESULT factory_res = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-    ASSERT(SUCCEEDED(factory_res));
-
-    IDXGIAdapter1* adapters[8] = {};
-    u32 adapters_count = 0;
-    for (u32 i = 0; i < ARRAY_COUNT(adapters); i++) {
-        HRESULT res = factory->EnumAdapters1(i, &adapters[i]);
-        if (res == DXGI_ERROR_NOT_FOUND) break;
-        adapters_count += 1;
-    }
-
-    // FIXME: this should look for the discrete GPU in priority
-    i32 hardware_adapter_id = -1;
-    for (u32 i = 0; i < adapters_count; i++) {
-        DXGI_ADAPTER_DESC1 desc;
-        HRESULT desc_res = adapters[i]->GetDesc1(&desc);
-        ASSERT(SUCCEEDED(desc_res));
-
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-
-        hardware_adapter_id = i;
-        OutputDebugStringW(desc.Description);
-        OutputDebugStringA("\n");
-        break;
-    }
-
-    ASSERT(hardware_adapter_id >= 0);
-
-    HRESULT creation_res = D3D12CreateDevice(adapters[hardware_adapter_id], D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&context.device));
-    ASSERT(SUCCEEDED(creation_res));
-
-    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
-    queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    HRESULT queue_res = context.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&context.command_queue));
-    ASSERT(SUCCEEDED(queue_res));
-
-    IDXGISwapChain1* legacy_swapchain;
-    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {};
-    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapchain_desc.BufferCount = FRAMES_IN_FLIGHT;
-    swapchain_desc.SampleDesc.Count = 1;
-    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    HRESULT swapchain_res = factory->CreateSwapChainForHwnd(
-        context.command_queue,
-        window_handle,
-        &swapchain_desc,
-        NULL,
-        NULL,
-        &legacy_swapchain
-    );
-    ASSERT(SUCCEEDED(swapchain_res));
-    legacy_swapchain->QueryInterface(IID_PPV_ARGS(&context.swapchain));
-
-    // NOTE: descriptor heap for our render target views
-    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
-    rtv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
-    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    HRESULT rtv_heap_res = context.device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&context.rtv_heap));
-    ASSERT(SUCCEEDED(rtv_heap_res));
-    context.rtv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-
-    // NOTE: fill the heap with our 2 render target views
-    D3D12_CPU_DESCRIPTOR_HANDLE heap_ptr = context.rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        // NOTE: we first get a ID3D12Resource (handle for the actual GPU memory of the swapchain)
-        // and then create a render target view from that
-        HRESULT swapchain_buffer_res = context.swapchain->GetBuffer(frame_idx, IID_PPV_ARGS(&context.render_target_resources[frame_idx]));
-        ASSERT(SUCCEEDED(swapchain_buffer_res));
-        context.device->CreateRenderTargetView(context.render_target_resources[frame_idx], NULL, heap_ptr);
-        heap_ptr.ptr += context.rtv_descriptor_size;
-    }
-
-    // NOTE: kinda the same thing for depth buffers, except we need to create them since they are not managed by the DXGI swapchain object
-    RECT client_rect;
-    GetClientRect(window_handle, &client_rect);
-
-    D3D12_RESOURCE_DESC depth_desc = {};
-    depth_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depth_desc.Width = client_rect.right;
-    depth_desc.Height = client_rect.bottom;
-    depth_desc.DepthOrArraySize = 1;
-    depth_desc.MipLevels = 1;
-    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-    depth_desc.SampleDesc.Count = 1;
-    depth_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-    D3D12_CLEAR_VALUE clear_value = {};
-    clear_value.Format = DXGI_FORMAT_D32_FLOAT;
-    clear_value.DepthStencil.Depth = 1.0f;
-    clear_value.DepthStencil.Stencil = 0;
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        D3D12_HEAP_PROPERTIES depth_heap_props = {};
-        depth_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-        depth_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        depth_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        depth_heap_props.CreationNodeMask = 1;
-        depth_heap_props.VisibleNodeMask = 1;
-
-        HRESULT heap_creation_result = context.device->CreateCommittedResource(
-            &depth_heap_props,
-            D3D12_HEAP_FLAG_NONE,
-            &depth_desc,
-            D3D12_RESOURCE_STATE_DEPTH_WRITE,
-            &clear_value,
-            IID_PPV_ARGS(&context.depth_target_resources[frame_idx])
-        );
-        ASSERT(SUCCEEDED(heap_creation_result));
-    }
-
-    D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
-    dsv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
-    dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    HRESULT dsv_heap_res = context.device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&context.dsv_heap));
-    ASSERT(SUCCEEDED(dsv_heap_res));
-    context.dsv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
-    // NOTE: fill the descriptor heap with our 2 depth buffer views
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_heap_ptr = context.dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
-
-        context.device->CreateDepthStencilView(context.depth_target_resources[frame_idx], &dsv_desc, dsv_heap_ptr);
-        dsv_heap_ptr.ptr += context.dsv_descriptor_size;
-    }
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context.frames[frame_idx].command_allocator));
-        ASSERT(SUCCEEDED(command_allocator_res));
-    }
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT cmd_list_res = context.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, context.frames[frame_idx].command_allocator, NULL, IID_PPV_ARGS(&context.frames[frame_idx].command_list));
-        ASSERT(SUCCEEDED(cmd_list_res));
-        HRESULT close_res = context.frames[frame_idx].command_list->Close();
-        ASSERT(SUCCEEDED(close_res));
-    }
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT fence_res = context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.frames[frame_idx].fence));
-        ASSERT(SUCCEEDED(fence_res));
-
-        context.frames[frame_idx].fence_wait_event = CreateEventA(NULL, FALSE, FALSE, NULL);
-    }
-
-    context.current_frame_idx = context.swapchain->GetCurrentBackBufferIndex();
-
-    return context;
-}
 
 D3D12RenderPipeline initDebugChunkPipeline(D3D12Context* d3d_context, b32 wireframe, b32 backface_culling) {
     D3D12RenderPipeline result = {};
@@ -362,56 +164,7 @@ D3D12RenderPipeline initDebugChunkPipeline(D3D12Context* d3d_context, b32 wirefr
     return result;
 }
 
-enum DrawOrderType {
-    DRAW_ORDER_LOOK_AT,
-    DRAW_ORDER_SOLID_PIPELINE,
-    DRAW_ORDER_WIREFRAME_PIPELINE,
-    DRAW_ORDER_DEBUG_MESH,
-};
-
-struct DrawOrderLookAt {
-    v3 eye;
-    v3 target;
-    f32 fov;
-};
-
-struct DrawOrderDebugMesh {
-    v3 position;
-};
-
-struct DrawOrder {
-    DrawOrderType type;
-    union {
-        DrawOrderLookAt look_at;
-        DrawOrderDebugMesh debug_mesh;
-    };
-};
-
-void pushDebugMesh(v3 position) {
-    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_DEBUG_MESH;
-    order->debug_mesh.position = position;
-}
-
-void pushLookAtCamera(v3 eye, v3 target, f32 fov) {
-    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_LOOK_AT;
-    order->look_at.eye = eye;
-    order->look_at.target = target;
-    order->look_at.fov = fov;
-}
-
-void pushSolidColorPipeline() {
-    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_SOLID_PIPELINE;
-}
-
-void pushWireframePipeline() {
-    DrawOrder* order = pushStruct(&global_draw_orders_arena, DrawOrder);
-    order->type = DRAW_ORDER_WIREFRAME_PIPELINE;
-}
-
-void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, D3D12FrameContext* current_frame, D3D12RenderPipeline* solid_pipeline, D3D12RenderPipeline* wireframe_pipeline) {
+void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_context, FrameContext* current_frame, D3D12RenderPipeline* solid_pipeline, D3D12RenderPipeline* wireframe_pipeline) {
 
     // NOTE: reset the frame's command allocator and list, now that they are no
     // longer in use
@@ -460,7 +213,7 @@ void renderFrame(Arena* draw_orders_arena, HWND window, D3D12Context* d3d_contex
     depth_buffer_view.ptr = d3d_context->dsv_heap->GetCPUDescriptorHandleForHeapStart().ptr + d3d_context->dsv_descriptor_size * d3d_context->current_frame_idx;
 
     // NOTE: clear and render
-    f32 clear_color[] = {0.1, 0.1, 0.3, 1.0};
+    f32 clear_color[] = {0.1, 0.1, 0.2, 1.0};
     current_frame->command_list->ClearRenderTargetView(render_target_view, clear_color, 0, NULL);
     current_frame->command_list->ClearDepthStencilView(depth_buffer_view, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
 
@@ -607,7 +360,7 @@ void debugUploadMeshBlocking(f32* data, usize size) {
     // NOTE: This is horrible, but use the current frame's command buffer to begin the transfer.
     // WARNING: This only works because we're waiting for the queued up commands to be completed
     // before calling gameUpdate, which we shouldn't do anyways. Use a separate command queue for uploads, maybe ?
-    D3D12FrameContext* current_frame = &global_d3d_context->frames[global_d3d_context->current_frame_idx];
+    FrameContext* current_frame = &global_d3d_context->frames[global_d3d_context->current_frame_idx];
 
     HRESULT alloc_reset = current_frame->command_allocator->Reset();
     ASSERT(SUCCEEDED(alloc_reset));
@@ -652,6 +405,7 @@ void debugUploadMeshBlocking(f32* data, usize size) {
     global_debug_mesh_vertex_buffer.view.SizeInBytes = size;
     global_debug_mesh_vertex_buffer.count = size / (6 * sizeof(f32));
 }
+*/
 
 struct TimingInfo {
     i64 timestamp;
@@ -698,7 +452,7 @@ void printTimingInfo(TimingInfo* info) {
 
 void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previous_input_state, WindowsInputState* current_input_state) {
 
-    // NOTE: clear the current input state since we are polling the whole state every frame
+    // NOTE: Clear the current input state since we are polling the whole state every frame.
     *current_input_state = {};
 
     IGameInputReading* kb_reading;
@@ -707,8 +461,9 @@ void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previ
     if (SUCCEEDED(kb_reading_res)) {
         current_input_state->input_state.is_analog = false;
 
-        // NOTE: up to 16 different keys pressed at the same time
-        // most keyboards upport fewer simultaneous presses than that
+        // NOTE: That stack array has room for up to 16 different keys pressed
+        // at the same time, but I think most keyboards do not support that much
+        // in the first place.
         GameInputKeyState key_states[16];
         u32 key_states_count = kb_reading->GetKeyCount();
         ASSERT(key_states_count < ARRAY_COUNT(key_states));
@@ -883,10 +638,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     global_running = true;
 
-    D3D12Context d3d_context = initD3D12(window);
-    global_d3d_context = &d3d_context;
-    D3D12RenderPipeline solid_color_pipeline = initDebugChunkPipeline(&d3d_context, false, true);
-    D3D12RenderPipeline wireframe_pipeline = initDebugChunkPipeline(&d3d_context, true, false);
+    GPU_Context d3d_context = initD3D12(window, true);
+    //D3D12RenderPipeline solid_color_pipeline = initDebugChunkPipeline(&d3d_context, false, true);
+    //D3D12RenderPipeline wireframe_pipeline = initDebugChunkPipeline(&d3d_context, true, false);
 
     TimingInfo timing_info = initTimingInfo();
     GameMemory game_memory = {};
@@ -897,16 +651,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     GameCode game_code = {};
 
     PlatformAPI platform_api = {};
-    platform_api.pushLookAtCamera = pushLookAtCamera;
-    platform_api.pushSolidColorPipeline = pushSolidColorPipeline;
-    platform_api.pushWireframePipeline = pushWireframePipeline;
-    platform_api.debugUploadMeshBlocking = debugUploadMeshBlocking;
-    platform_api.pushDebugMesh = pushDebugMesh;
-
-    usize draw_orders_capacity = MEGABYTES(2);
-    void* draw_orders_memory = VirtualAlloc(NULL, draw_orders_capacity, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT(draw_orders_memory != NULL);
-    global_draw_orders_arena = makeArena(draw_orders_memory, draw_orders_capacity);
+    platform_api.createUploadBuffer = createUploadBuffer;
+    platform_api.createGPUBuffer = createGPUBuffer;
+    platform_api.mapUploadBuffer = mapUploadBuffer;
+    platform_api.unmapUploadBuffer = unmapUploadBuffer;
+    platform_api.blockingUploadToGPUBuffer = blockingUploadToGPUBuffer;
+    platform_api.waitForCommandBuffer = waitForCommandBuffer;
+    platform_api.sendCommandBufferAndPresent = sendCommandBufferAndPresent;
+    platform_api.recordClearCommand = recordClearCommand;
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -946,22 +698,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         pollGameInput(window, microsoft_game_input_interface, previous_input_state, current_input_state);
 
-        // NOTE: wait for the backbuffer to be ready, by sleeping until its value
-        // gets updated by the signal command we enqueued last time we rendered
-        // to that framebuffer
-        D3D12FrameContext* current_frame = &d3d_context.frames[d3d_context.current_frame_idx];
-        if(current_frame->fence->GetCompletedValue() < current_frame->fence_ready_value) {
-            current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
-            WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
-        }
-
-        // FIXME: move the game update to BEFORE the VSYNC wait, once the GPU async transfer stuff is prototyped
         if (game_code.is_valid) {
             // TODO: compute the actual dt
-            game_code.game_update(1.f/60.f, &platform_api, &game_memory, &current_input_state->input_state);
+            game_code.game_update(1.f/60.f, &d3d_context, &platform_api, &game_memory, &current_input_state->input_state);
         }
-        renderFrame(&global_draw_orders_arena, window, &d3d_context, current_frame, &solid_color_pipeline, &wireframe_pipeline);
-        clearArena(&global_draw_orders_arena);
 
         // NOTE: Swap the user input buffers
         WindowsInputState* tmp = current_input_state;

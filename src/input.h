@@ -55,11 +55,11 @@ struct ButtonState {
     u8 transitions;
 };
 
-// NOTE: The keys array is indexed by scancodes because i feel like
+// NOTE: The keys array is indexed by scancodes because I feel like
 // it is more common to want to know if a key "position" has been pressed
 // (e.g. for WASD movement) than if the key pressed has the letter W or Z written on it.
-// However you sometimes want the exact letter (e.g. I for inventory) so i need
-// to write a keycodeToScancode function eventually
+// However you sometimes want the exact letter (e.g. I for inventory) so I need
+// to write a keycodeToScancode function eventually.
 struct KeyboardState {
     v2 mouse_delta;
     ButtonState keys[SCANCODE_COUNT];
