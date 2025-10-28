@@ -444,6 +444,20 @@ void setPipeline(GPU_CommandBuffer* command_buffer, GPU_Pipeline* pipeline) {
 }
 
 void setVertexBuffer(GPU_CommandBuffer* command_buffer, GPU_Buffer* vertex_buffer) {
+    ASSERT(vertex_buffer->usage_state == D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+
+    if (!vertex_buffer->in_usage_state) {
+        D3D12_RESOURCE_BARRIER to_vertex_buffer_barrier = {};
+        to_vertex_buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_vertex_buffer_barrier.Transition.pResource = vertex_buffer->resource;
+        to_vertex_buffer_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST; // FIXME: This might not be the previous state.
+        to_vertex_buffer_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        to_vertex_buffer_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        command_buffer->command_list->ResourceBarrier(1, &to_vertex_buffer_barrier);
+
+        vertex_buffer->in_usage_state = true;
+    }
+
     D3D12_VERTEX_BUFFER_VIEW view;
     view.BufferLocation = vertex_buffer->resource->GetGPUVirtualAddress();
     view.StrideInBytes = command_buffer->bound_pipeline->vertex_stride;
@@ -598,4 +612,20 @@ GPU_Pipeline* createPipeline(GPU_Context* gpu_context, GPU_RootConstant* root_co
 
 void drawCall(GPU_CommandBuffer* command_buffer, usize vertex_count) {
     command_buffer->command_list->DrawInstanced(vertex_count, 1, 0, 0);
+}
+
+void waitForGPU(GPU_Context* gpu_context) {
+    FrameContext* current_frame = &gpu_context->frames[gpu_context->current_frame_idx];
+
+    gpu_context->graphics_command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
+    if(current_frame->fence->GetCompletedValue() < current_frame->fence_ready_value) {
+        current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
+        WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
+    }
+
+    gpu_context->copy_command_queue->Signal(gpu_context->copy_fence, ++gpu_context->copy_fence_ready_value);
+    if (gpu_context->copy_fence->GetCompletedValue() < gpu_context->copy_fence_ready_value) {
+        gpu_context->copy_fence->SetEventOnCompletion(gpu_context->copy_fence_ready_value, gpu_context->copy_fence_wait_event);
+        WaitForSingleObject(gpu_context->copy_fence_wait_event, INFINITE);
+    }
 }

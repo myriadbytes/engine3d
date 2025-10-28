@@ -47,6 +47,7 @@ void blockingUploadToGPUBuffer(GPU_Context* gpu_context, GPU_UploadBuffer* src_b
 // to GraphicsCommandBuffer or something.
 GPU_CommandBuffer* waitForCommandBuffer(GPU_Context* gpu_context, Arena* arena);
 void sendCommandBufferAndPresent(GPU_Context* gpu_context, GPU_CommandBuffer* command_buffer);
+void waitForGPU(GPU_Context* gpu_context);
 
 void recordClearCommand(GPU_Context* gpu_context, GPU_CommandBuffer* command_buffer, f32* clear_color);
 void pushConstant(GPU_CommandBuffer* command_buffer, u32 slot, void* data, usize size);

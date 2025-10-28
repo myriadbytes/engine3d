@@ -282,6 +282,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     platform_api.setPipeline = setPipeline;
     platform_api.setVertexBuffer = setVertexBuffer;
     platform_api.drawCall = drawCall;
+    platform_api.waitForGPU = waitForGPU;
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -298,7 +299,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
-        printTimingInfo(&timing_info);
+        //printTimingInfo(&timing_info);
 
         // NOTE: reload game code
         const char* dll_name = "game.dll";

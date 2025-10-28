@@ -34,6 +34,7 @@ struct PlatformAPI {
     decltype(setPipeline)* setPipeline;
     decltype(setVertexBuffer)* setVertexBuffer;
     decltype(drawCall)* drawCall;
+    decltype(waitForGPU)* waitForGPU;
 };
 
 // TODO: should we pass the function pointers every frame ?

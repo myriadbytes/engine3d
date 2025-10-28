@@ -289,9 +289,15 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
         for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-            if (randomNextU32(&game_state->random_series) % 8 != 0) {
+            //if (randomNextU32(&game_state->random_series) % 2 == 0) {
                 game_state->chunk.data[i] = 1;
-            }
+                //}
+            // usize x = (i % CHUNK_W);
+            // usize y = (i / CHUNK_W) % (CHUNK_W);
+            // usize z = (i / (CHUNK_W * CHUNK_W));
+            // if ((x + y + z) % 2 == 0) {
+                // game_state->chunk.data[i] = 1;
+            // }
         }
 
         // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
@@ -376,6 +382,10 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
     usize block_idx;
     if (should_remove_block && raycast_chunk_traversal(&game_state->chunk, traversal_origin, camera_forward, &block_idx)) {
         game_state->chunk.data[block_idx] = 0;
+        // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
+        // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
+        // i.e. generate the mesh but only upload it after the previous frame is rendered. Perhaps in a separate thread.
+        platform_api->waitForGPU(gpu_context);
         refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
     }
 
