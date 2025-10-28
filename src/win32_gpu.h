@@ -23,6 +23,7 @@ struct FrameContext {
 };
 
 struct GPU_Context {
+    HWND window;
     ID3D12Debug* debug_interface;
 
     ID3D12Device* device;
@@ -55,10 +56,23 @@ struct GPU_Buffer {
     ID3D12Resource* resource;
     D3D12_RESOURCE_STATES usage_state;
     b32 in_usage_state;
+    usize size;
 };
 
 struct GPU_CommandBuffer {
     ID3D12GraphicsCommandList* command_list;
+    GPU_Pipeline* bound_pipeline;
+};
+
+struct GPU_Shader {
+    ID3DBlob* shader_blob;
+};
+
+struct GPU_Pipeline {
+    ID3D12RootSignature* root_signature;
+    ID3D12PipelineState* pipeline_state;
+
+    usize vertex_stride;
 };
 
 GPU_Context initD3D12(HWND window_handle, b32 debug_mode);

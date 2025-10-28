@@ -2,6 +2,7 @@
 
 GPU_Context initD3D12(HWND window_handle, b32 debug_mode) {
     GPU_Context context = {};
+    context.window = window_handle;
 
     // FIXME: release all the COM objects
 
@@ -230,6 +231,7 @@ GPU_UploadBuffer* createUploadBuffer(GPU_Context* gpu_context, usize size, Arena
 GPU_Buffer* createGPUBuffer(GPU_Context* gpu_context, usize size, GPU_BufferUsage usage, Arena* arena) {
 
     GPU_Buffer* result = pushStruct(arena, GPU_Buffer);
+    result->size = size;
 
     D3D12_HEAP_PROPERTIES heap_props = {};
     heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
@@ -346,6 +348,7 @@ GPU_CommandBuffer* waitForCommandBuffer(GPU_Context* gpu_context, Arena* arena) 
         current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
         WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
     }
+    result->command_list = current_frame->command_list;
 
     // NOTE: Reset the frame's command allocator and list, now that they are no longer in use.
     HRESULT alloc_reset = current_frame->command_allocator->Reset();
@@ -362,7 +365,30 @@ GPU_CommandBuffer* waitForCommandBuffer(GPU_Context* gpu_context, Arena* arena) 
     render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     current_frame->command_list->ResourceBarrier(1, &render_barrier);
 
-    result->command_list = current_frame->command_list;
+    // NOTE: Hardcode this here for now.
+    RECT clientRect;
+    GetClientRect(gpu_context->window, &clientRect);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = clientRect.right;
+    viewport.Height = clientRect.bottom;
+    viewport.MinDepth = 0.0;
+    viewport.MaxDepth = 1.0;
+
+    D3D12_RECT scissor = {};
+    scissor.top = viewport.TopLeftY;
+    scissor.bottom = viewport.Height;
+    scissor.left = viewport.TopLeftX;
+    scissor.right = viewport.Width;
+
+    current_frame->command_list->RSSetViewports(1, &viewport);
+    current_frame->command_list->RSSetScissorRects(1, &scissor);
+
+    current_frame->command_list->OMSetRenderTargets(1, &current_frame->render_target_view_descriptor, FALSE, &current_frame->depth_target_view_descriptor);
+    current_frame->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
     return result;
 }
 
@@ -404,4 +430,172 @@ void recordClearCommand(GPU_Context* gpu_context, GPU_CommandBuffer* command_buf
 
     command_buffer->command_list->ClearRenderTargetView(current_frame->render_target_view_descriptor, clear_color, 0, NULL);
     command_buffer->command_list->ClearDepthStencilView(current_frame->depth_target_view_descriptor, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+}
+
+void pushConstant(GPU_CommandBuffer* command_buffer, u32 slot, void* data, usize size) {
+    command_buffer->command_list->SetGraphicsRoot32BitConstants(slot, size/sizeof(u32), data, 0);
+}
+
+void setPipeline(GPU_CommandBuffer* command_buffer, GPU_Pipeline* pipeline) {
+    command_buffer->command_list->SetPipelineState(pipeline->pipeline_state);
+    command_buffer->command_list->SetGraphicsRootSignature(pipeline->root_signature);
+
+    command_buffer->bound_pipeline = pipeline;
+}
+
+void setVertexBuffer(GPU_CommandBuffer* command_buffer, GPU_Buffer* vertex_buffer) {
+    D3D12_VERTEX_BUFFER_VIEW view;
+    view.BufferLocation = vertex_buffer->resource->GetGPUVirtualAddress();
+    view.StrideInBytes = command_buffer->bound_pipeline->vertex_stride;
+    view.SizeInBytes = vertex_buffer->size;
+
+    command_buffer->command_list->IASetVertexBuffers(0, 1, &view);
+}
+
+GPU_Shader* createShader(GPU_Context* gpu_context, char* path, GPU_ShaderType type, Arena* arena) {
+    GPU_Shader* result = pushStruct(arena, GPU_Shader);
+
+    ID3DBlob* shader;
+    ID3DBlob* shader_compilation_err;
+
+    const char* entry_point;
+    const char* version;
+    switch (type) {
+        case GPU_SHADER_TYPE_VERTEX: {
+            entry_point = "VSMain";
+            version = "vs_5_0";
+        } break;
+        case GPU_SHADER_TYPE_FRAGMENT: {
+            entry_point = "PSMain";
+            version = "ps_5_0";
+        } break;
+        default: {
+            ASSERT(false);
+        }
+    }
+
+    // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
+    HRESULT shader_err = D3DCompileFromFile((const wchar_t*)path, NULL, NULL, entry_point, version, 0, 0, &shader, &shader_compilation_err);
+    if (shader_compilation_err) {
+        OutputDebugStringA((char*)shader_compilation_err->GetBufferPointer());
+    }
+    ASSERT(SUCCEEDED(shader_err));
+
+    result->shader_blob = shader;
+
+    return result;
+}
+
+GPU_Pipeline* createPipeline(GPU_Context* gpu_context, GPU_RootConstant* root_constants, u32 num_root_constants, GPU_VertexAttribute* vertex_attributes, u32 num_vertex_attributes, GPU_Shader* vertex_shader, GPU_Shader* fragment_shader, b32 backface_culling, b32 wireframe, Arena* arena) {
+    GPU_Pipeline* result = pushStruct(arena, GPU_Pipeline);
+
+    D3D12_ROOT_PARAMETER root_parameters[8] = {};
+
+    for (int i = 0 ; i < num_root_constants; i++) {
+        root_parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        root_parameters[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        root_parameters[i].Constants.Num32BitValues = root_constants[i].size / sizeof(u32);
+        root_parameters[i].Constants.ShaderRegister = root_constants[i].slot;
+        root_parameters[i].Constants.RegisterSpace = 0;
+    }
+
+    D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+    root_signature_desc.NumParameters = num_root_constants;
+    root_signature_desc.pParameters = root_parameters;
+    root_signature_desc.NumStaticSamplers = 0;
+    root_signature_desc.pStaticSamplers = NULL;
+    root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    ID3DBlob* serialized_signature;
+    ID3DBlob* serialize_err;
+    D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized_signature, &serialize_err);
+    ASSERT(serialize_err == NULL);
+    HRESULT signature_res = gpu_context->device->CreateRootSignature(0, serialized_signature->GetBufferPointer(), serialized_signature->GetBufferSize(), IID_PPV_ARGS(&result->root_signature));
+    ASSERT(SUCCEEDED(signature_res));
+
+    // NOTE : Pipeline stage config. Most options are fixed now.
+    D3D12_INPUT_ELEMENT_DESC input_descriptions[8];
+
+    ASSERT(num_vertex_attributes <= 2);
+    usize current_attribute_offset = 0;
+    for (int i = 0 ; i < num_vertex_attributes; i++) {
+        // TODO: Set the format based on the size of the attribute ?
+        ASSERT(vertex_attributes[i].size == 3 * sizeof(f32));
+
+        input_descriptions[i].SemanticName = i == 0 ? "POSITION" : "NORMAL";
+        input_descriptions[i].SemanticIndex = 0;
+        input_descriptions[i].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+        input_descriptions[i].InputSlot = 0;
+        input_descriptions[i].AlignedByteOffset = current_attribute_offset;
+        input_descriptions[i].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        input_descriptions[i].InstanceDataStepRate = 0;
+
+        current_attribute_offset += vertex_attributes[i].size;
+    }
+    result->vertex_stride = current_attribute_offset;
+
+    D3D12_RASTERIZER_DESC rasterizer_desc = {};
+    rasterizer_desc.FillMode = wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
+    rasterizer_desc.CullMode = backface_culling ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+    rasterizer_desc.FrontCounterClockwise = true;
+    rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+    rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+    rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+    rasterizer_desc.DepthClipEnable = TRUE;
+    rasterizer_desc.MultisampleEnable = FALSE;
+    rasterizer_desc.AntialiasedLineEnable = FALSE;
+    rasterizer_desc.ForcedSampleCount = 0;
+    rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+    D3D12_BLEND_DESC blend_desc = {};
+    blend_desc.AlphaToCoverageEnable = FALSE;
+    blend_desc.IndependentBlendEnable = FALSE;
+    blend_desc.RenderTarget[0].BlendEnable = FALSE;
+    blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
+    blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+    blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+    blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+    blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+    blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    D3D12_DEPTH_STENCIL_DESC depth_desc = {};
+    depth_desc.DepthEnable = TRUE;
+    depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    depth_desc.StencilEnable = FALSE;
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
+    pipeline_desc.InputLayout.pInputElementDescs = input_descriptions;
+    pipeline_desc.InputLayout.NumElements = num_vertex_attributes;
+
+    pipeline_desc.pRootSignature = result->root_signature;
+
+    pipeline_desc.VS.pShaderBytecode = vertex_shader->shader_blob->GetBufferPointer();
+    pipeline_desc.VS.BytecodeLength = vertex_shader->shader_blob->GetBufferSize();
+    pipeline_desc.PS.pShaderBytecode = fragment_shader->shader_blob->GetBufferPointer();
+    pipeline_desc.PS.BytecodeLength = fragment_shader->shader_blob->GetBufferSize();
+
+    pipeline_desc.RasterizerState = rasterizer_desc;
+    pipeline_desc.BlendState = blend_desc;
+
+    pipeline_desc.DepthStencilState = depth_desc;
+    pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+
+    pipeline_desc.SampleMask = UINT_MAX;
+    pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_desc.NumRenderTargets = 1;
+    pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    pipeline_desc.SampleDesc.Count = 1;
+
+    HRESULT pipeline_res = gpu_context->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&result->pipeline_state));
+    ASSERT(SUCCEEDED(pipeline_res));
+
+    return result;
+}
+
+void drawCall(GPU_CommandBuffer* command_buffer, usize vertex_count) {
+    command_buffer->command_list->DrawInstanced(vertex_count, 1, 0, 0);
 }

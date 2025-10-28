@@ -12,6 +12,7 @@ struct ChunkVertex {
 
 struct Chunk {
     u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
+    usize vertices_count;
 };
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
@@ -237,14 +238,13 @@ void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* ch
 
     // NOTE: generate directly in the mapped upload buffer
     ChunkVertex* buffer = (ChunkVertex*) platform_api->mapUploadBuffer(gpu_context, upload_buffer);
-    usize generated_vertex_count;
 
-    generateNaiveChunkMesh(chunk, buffer, &generated_vertex_count);
+    generateNaiveChunkMesh(chunk, buffer, &chunk->vertices_count);
 
     platform_api->unmapUploadBuffer(gpu_context, upload_buffer);
     // TODO: add a way to check that the number of generated vertices is not bigger than the upload and vertex buffers
 
-    platform_api->blockingUploadToGPUBuffer(gpu_context, upload_buffer, vertex_buffer, generated_vertex_count * sizeof(ChunkVertex));
+    platform_api->blockingUploadToGPUBuffer(gpu_context, upload_buffer, vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
 }
 
 struct GameState {
@@ -258,6 +258,8 @@ struct GameState {
     Chunk chunk;
     GPU_UploadBuffer* chunk_upload_buffer;
     GPU_Buffer* chunk_vertex_buffer;
+    GPU_Pipeline* chunk_render_pipeline;
+    GPU_Pipeline* wireframe_render_pipeline;
 
     b32 is_wireframe;
 
@@ -286,15 +288,26 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->camera_yaw = 3 * PI32 / 2;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
+        for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
+            if (randomNextU32(&game_state->random_series) % 8 != 0) {
+                game_state->chunk.data[i] = 1;
+            }
+        }
+
         // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
         game_state->chunk_upload_buffer = platform_api->createUploadBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), &game_state->static_arena);
         game_state->chunk_vertex_buffer = platform_api->createGPUBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), GPU_BUFFER_USAGE_VERTEX, &game_state->static_arena);
 
-        for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-            if (randomNextU32(&game_state->random_series) % 2 == 0) {
-                game_state->chunk.data[i] = 1;
-            }
-        }
+        GPU_Shader* chunk_vertex_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->static_arena);
+        GPU_Shader* chunk_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
+        GPU_RootConstant chunk_render_pipeline_constants[2] = {{0, sizeof(m4)}, {1, sizeof(m4)}};
+        GPU_VertexAttribute chunk_render_pipeline_vertex_attributes[2] = {{0, sizeof(v3)}, {sizeof(v3), sizeof(v3)}};
+        game_state->chunk_render_pipeline = platform_api->createPipeline(gpu_context, chunk_render_pipeline_constants, 2, chunk_render_pipeline_vertex_attributes, 2, chunk_vertex_shader, chunk_fragment_shader, true, false, &game_state->static_arena);
+
+        GPU_Shader* wireframe_vertex_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\solid_color.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->static_arena);
+        GPU_Shader* wireframe_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\solid_color.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
+        GPU_RootConstant wireframe_render_pipeline_constants[3] = {{0, sizeof(m4)}, {1, sizeof(m4)}, {2, sizeof(v4)}};
+        game_state->wireframe_render_pipeline = platform_api->createPipeline(gpu_context, wireframe_render_pipeline_constants, 3, chunk_render_pipeline_vertex_attributes, 2, wireframe_vertex_shader, wireframe_fragment_shader, false, true, &game_state->static_arena);
 
         refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
 
@@ -368,19 +381,27 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
 
     // RENDERING
     GPU_CommandBuffer* cmd_buf = platform_api->waitForCommandBuffer(gpu_context, &game_state->frame_arena);
-    f32 clear_color[] = {0.9, 0, 0.1, 1};
+    f32 clear_color[] = {0.1, 0.1, 0.2, 1};
     platform_api->recordClearCommand(gpu_context, cmd_buf, clear_color);
-    platform_api->sendCommandBufferAndPresent(gpu_context, cmd_buf);
+
+    m4 chunk_model = makeTranslation(0, 0, 0);
+    m4 camera_matrix = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + camera_forward);
 
     if (game_state->is_wireframe) {
-        //platform_api->pushWireframePipeline();
+        platform_api->setPipeline(cmd_buf, game_state->wireframe_render_pipeline);
+        v4 wireframe_color = {1, 1, 1, 1};
+        platform_api->pushConstant(cmd_buf, 2, wireframe_color.data, sizeof(v4));
     } else {
-        //platform_api->pushSolidColorPipeline();
+        platform_api->setPipeline(cmd_buf, game_state->chunk_render_pipeline);
     }
 
-    //platform_api->pushLookAtCamera(game_state->player_position, game_state->player_position + camera_forward, 90);
+    platform_api->pushConstant(cmd_buf, 0, chunk_model.data, sizeof(m4));
+    platform_api->pushConstant(cmd_buf, 1, camera_matrix.data, sizeof(m4));
 
-    //platform_api->pushDebugMesh(v3 {0, 0, 0});
+    platform_api->setVertexBuffer(cmd_buf, game_state->chunk_vertex_buffer);
+    platform_api->drawCall(cmd_buf, game_state->chunk.vertices_count);
+
+    platform_api->sendCommandBufferAndPresent(gpu_context, cmd_buf);
 
     clearArena(&game_state->frame_arena);
 }

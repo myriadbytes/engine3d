@@ -22,6 +22,12 @@ without dependencies to manage : the build script even generates a `compile_comm
 `clangd`-compatible editor !
 Running the `build.py` file should just work, provided you have `clang.exe` on your PATH. You can then just run `build/win32_game.exe`.
 
+## Controls:
+
+- WASD: Horizontal movement
+- Q/E: Vertical movement
+- SPACE: Remove block
+
 ## Game code hot-reloading:
 
 While the game is running, you can edit the `game.cpp` file and the code will be instantly hot-reloaded by the main executable when you run the build script.
