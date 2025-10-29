@@ -258,6 +258,7 @@ constexpr usize WORLD_W = 8;
 struct GameState {
     f32 time;
     RandomSeries random_series;
+    SimplexTable* simplex_table;
 
     f32 camera_pitch;
     f32 camera_yaw;
@@ -295,6 +296,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->camera_pitch = -1 * PI32 / 6;
         game_state->camera_yaw = 1 * PI32 / 3;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
+        game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
 
         for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
 
@@ -308,7 +310,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                 usize block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
 
                 f32 scaling_factor = 0.01;
-                f32 height = ((simplex_noise_2d((f32)block_x * scaling_factor, (f32) block_z * scaling_factor) + 1.f) / 2.f) * CHUNK_W;
+                f32 height = ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * scaling_factor, (f32) block_z * scaling_factor) + 1.f) / 2.f) * CHUNK_W;
 
                 if (block_y <= height) {
                     game_state->world[chunk_idx].data[block_idx] = 1;

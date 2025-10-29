@@ -1,10 +1,12 @@
 #include "noise.h"
+#include "maths.h"
 
 // NOTE: This article is great to understand how simplex noise works, and has a reference implementation.
 // https://cgvr.cs.uni-bremen.de/teaching/cg_literatur/simplexnoise.pdf
 
-// NOTE: The code in this file is copied pretty closely from Sebastien Rombauts' C++ implementation,
-// who seems to have put a little more thought into performance when compared to the article implementation.
+// NOTE: The actual simplex algorithm in this file is copied pretty closely from Sebastien Rombauts' C++
+// implementation, who seems to have a little more performance thought put into it when compared to
+// the article implementation.
 // https://github.com/SRombauts/SimplexNoise/blob/master/src/SimplexNoise.cpp
 
 // TODO: OpenSimplex2 does not seem to use a precomputed permutation table, and
@@ -12,24 +14,29 @@
 // be added to the classic simplex ?
 // https://github.com/KdotJPG/OpenSimplex2/
 
-constexpr u8 permutations[256] = {
-    151, 160, 137, 91, 90, 15,
-    131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23,
-    190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32, 57, 177, 33,
-    88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175, 74, 165, 71, 134, 139, 48, 27, 166,
-    77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133, 230, 220, 105, 92, 41, 55, 46, 245, 40, 244,
-    102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76, 132, 187, 208, 89, 18, 169, 200, 196,
-    135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173, 186, 3, 64, 52, 217, 226, 250, 124, 123,
-    5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206, 59, 227, 47, 16, 58, 17, 182, 189, 28, 42,
-    223, 183, 170, 213, 119, 248, 152, 2, 44, 154, 163, 70, 221, 153, 101, 155, 167, 43, 172, 9,
-    129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232, 178, 185, 112, 104, 218, 246, 97, 228,
-    251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162, 241, 81, 51, 145, 235, 249, 14, 239, 107,
-    49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204, 176, 115, 121, 50, 45, 127, 4, 150, 254,
-    138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141, 128, 195, 78, 66, 215, 61, 156, 180
-};
 
-inline u8 perm_hash(u32 i) {
-    return permutations[(u8)i];
+SimplexTable* simplex_table_from_seed(u64 seed, Arena* arena) {
+    SimplexTable* result = pushStruct(arena, SimplexTable);
+
+    for (usize i = 0; i < ARRAY_COUNT(result->permutations); i++) {
+        result->permutations[i] = i;
+    }
+
+    // NOTE: This is called a Fisher–Yates shuffle, apparently.
+    for (usize i = ARRAY_COUNT(result->permutations) - 1; i > 0; i--) {
+        f32 r = randomUnilateral(&seed);
+        usize j = (u32)(r * (f32)i);
+
+        u8 tmp = result->permutations[i];
+        result->permutations[i] = result->permutations[j];
+        result->permutations[j] = tmp;
+    }
+
+    return result;
+}
+
+inline u8 perm_hash(SimplexTable* simplex_state, u32 i) {
+    return simplex_state->permutations[i & 0xFF];
 }
 
 inline i32 fastfloor(f32 x) {
@@ -47,7 +54,7 @@ f32 grad(i32 hash, f32 x, f32 y) {
     return ((h & 1) ? -u : u) + ((h & 2) ? -2.0f * v : 2.0f * v);
 }
 
-f32 simplex_noise_2d(f32 x, f32 y) {
+f32 simplex_noise_2d(SimplexTable* simplex_table, f32 x, f32 y) {
     f32 n0, n1, n2;
 
     // NOTE: Factors to skew a simplex grid into a regular grid.
@@ -100,9 +107,9 @@ f32 simplex_noise_2d(f32 x, f32 y) {
     const f32 y2 = y0 - 1.0f + 2.0f * G2;
 
     // NOTE: Use the pseudo-hash lookup table to get a "random" value per simplex corner.
-    const i32 gi0 = perm_hash(i + perm_hash(j));
-    const i32 gi1 = perm_hash(i + i1 + perm_hash(j + j1));
-    const i32 gi2 = perm_hash(i + 1 + perm_hash(j + 1));
+    const i32 gi0 = perm_hash(simplex_table, i + perm_hash(simplex_table, j));
+    const i32 gi1 = perm_hash(simplex_table, i + i1 + perm_hash(simplex_table, j + j1));
+    const i32 gi2 = perm_hash(simplex_table, i + 1 + perm_hash(simplex_table, j + 1));
 
     // NOTE: Calculate the contribution from the first corner.
     float t0 = 0.5f - x0*x0 - y0*y0;

@@ -578,7 +578,7 @@ GPU_Pipeline* createPipeline(GPU_Context* gpu_context, GPU_RootConstant* root_co
     D3D12_DEPTH_STENCIL_DESC depth_desc = {};
     depth_desc.DepthEnable = TRUE;
     depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+    depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
     depth_desc.StencilEnable = FALSE;
 
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
