@@ -3,6 +3,7 @@
 constexpr usize CHUNK_W = 16;
 
 // NOTE: This is the worst case number of vertices that would be needed for a chunk mesh (with a "checkerboard" chunk).
+// This stops being true once we add transparent blocks. Too bad !
 constexpr usize WORST_CASE_CHUNK_VERTICES = ((CHUNK_W * CHUNK_W * CHUNK_W) / 2) * 6 * 2 * 3;
 
 struct ChunkVertex {
@@ -13,6 +14,8 @@ struct ChunkVertex {
 struct Chunk {
     u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
     usize vertices_count;
+    GPU_UploadBuffer* upload_buffer;
+    GPU_Buffer* vertex_buffer;
 };
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
@@ -122,7 +125,7 @@ void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_
     *out_generated_vertex_count = emitted;
 }
 
-b32 raycast_aabb(v3 ray_origin, v3 ray_direction, v3 bb_min, v3 bb_max, v3* out_intersection) {
+b32 raycast_aabb(v3 ray_origin, v3 ray_direction, v3 bb_min, v3 bb_max, f32* out_t) {
     // NOTE: Original algorithm from here:
     // https://tavianator.com/2011/ray_box.html
     f32 tmin = -INFINITY;
@@ -159,7 +162,7 @@ b32 raycast_aabb(v3 ray_origin, v3 ray_direction, v3 bb_min, v3 bb_max, v3* out_
         return false;
     }
 
-    *out_intersection = ray_origin + ray_direction * tmin;
+    *out_t = tmin;
     return true;
 }
 
@@ -234,18 +237,20 @@ b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_dire
     return false;
 }
 
-void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* chunk, GPU_UploadBuffer* upload_buffer, GPU_Buffer* vertex_buffer) {
+void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* chunk) {
 
     // NOTE: generate directly in the mapped upload buffer
-    ChunkVertex* buffer = (ChunkVertex*) platform_api->mapUploadBuffer(gpu_context, upload_buffer);
+    ChunkVertex* buffer = (ChunkVertex*) platform_api->mapUploadBuffer(gpu_context, chunk->upload_buffer);
 
     generateNaiveChunkMesh(chunk, buffer, &chunk->vertices_count);
 
-    platform_api->unmapUploadBuffer(gpu_context, upload_buffer);
+    platform_api->unmapUploadBuffer(gpu_context, chunk->upload_buffer);
     // TODO: add a way to check that the number of generated vertices is not bigger than the upload and vertex buffers
 
-    platform_api->blockingUploadToGPUBuffer(gpu_context, upload_buffer, vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
+    platform_api->blockingUploadToGPUBuffer(gpu_context, chunk->upload_buffer, chunk->vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
 }
+
+constexpr usize WORLD_W = 8;
 
 struct GameState {
     f32 time;
@@ -255,9 +260,8 @@ struct GameState {
     f32 camera_yaw;
     v3 player_position;
 
-    Chunk chunk;
-    GPU_UploadBuffer* chunk_upload_buffer;
-    GPU_Buffer* chunk_vertex_buffer;
+    Chunk world[WORLD_W * WORLD_W];
+
     GPU_Pipeline* chunk_render_pipeline;
     GPU_Pipeline* wireframe_render_pipeline;
 
@@ -288,21 +292,18 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->camera_yaw = 3 * PI32 / 2;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
-        for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-            //if (randomNextU32(&game_state->random_series) % 2 == 0) {
-                game_state->chunk.data[i] = 1;
-                //}
-            // usize x = (i % CHUNK_W);
-            // usize y = (i / CHUNK_W) % (CHUNK_W);
-            // usize z = (i / (CHUNK_W * CHUNK_W));
-            // if ((x + y + z) % 2 == 0) {
-                // game_state->chunk.data[i] = 1;
-            // }
-        }
+        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
+            for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
+                if (randomNextU32(&game_state->random_series) % 16 == 0) {
+                    game_state->world[chunk_idx].data[i] = 1;
+                }
+            }
 
-        // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
-        game_state->chunk_upload_buffer = platform_api->createUploadBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), &game_state->static_arena);
-        game_state->chunk_vertex_buffer = platform_api->createGPUBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), GPU_BUFFER_USAGE_VERTEX, &game_state->static_arena);
+            // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
+            game_state->world[chunk_idx].upload_buffer = platform_api->createUploadBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), &game_state->static_arena);
+            game_state->world[chunk_idx].vertex_buffer = platform_api->createGPUBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), GPU_BUFFER_USAGE_VERTEX, &game_state->static_arena);
+            refreshChunk(gpu_context, platform_api, &game_state->world[chunk_idx]);
+        }
 
         GPU_Shader* chunk_vertex_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->static_arena);
         GPU_Shader* chunk_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
@@ -314,8 +315,6 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         GPU_Shader* wireframe_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\solid_color.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
         GPU_RootConstant wireframe_render_pipeline_constants[3] = {{0, sizeof(m4)}, {1, sizeof(m4)}, {2, sizeof(v4)}};
         game_state->wireframe_render_pipeline = platform_api->createPipeline(gpu_context, wireframe_render_pipeline_constants, 3, chunk_render_pipeline_vertex_attributes, 2, wireframe_vertex_shader, wireframe_fragment_shader, false, true, &game_state->static_arena);
-
-        refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
 
         memory->is_initialized = true;
     }
@@ -337,10 +336,13 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
 
     v3 camera_right = normalize(cross(camera_forward, {0, 1, 0}));
 
-    f32 speed = 5 * dt;
+    f32 speed = 20 * dt;
     if (input->kb.keys[SCANCODE_LSHIFT].is_down) {
-        speed *= 2;
+        speed *= 5;
     }
+
+    // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
+    // Let's just say it's a Quake reference.
 
     if(input->kb.keys[SCANCODE_Q].is_down) {
         game_state->player_position.y -= speed;
@@ -365,28 +367,88 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->is_wireframe = !game_state->is_wireframe;
     }
 
-    // NOTE: If the player is not inside the debug chunk, we need to find the closest
-    // point along the ray that is inside the chunk in order to begin the voxel traversal.
-    b32 should_remove_block = input->kb.keys[SCANCODE_SPACE].is_down;
-    v3 traversal_origin;
+    // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
+    // There has to be a better way, maybe recursive ? But that has drawbacks too.
+    if (input->kb.keys[SCANCODE_SPACE].is_down) {
 
-    v3 chunk_bb_min = {0, 0, 0};
-    v3 chunk_bb_max = {CHUNK_W, CHUNK_W, CHUNK_W};
+        usize chunk_to_traverse = 0;
+        bool found_chunk = false;
+        v3 traversal_origin;
 
-    if (point_inclusion_aabb(game_state->player_position, chunk_bb_min, chunk_bb_max)) {
-        traversal_origin = game_state->player_position;
-    } else {
-        should_remove_block = should_remove_block && raycast_aabb(game_state->player_position, camera_forward, chunk_bb_min, chunk_bb_max, &traversal_origin);
-    }
+        // NOTE: If the player is inside a chunk already, we don't have to do a raycast the first time.
+        // This would be the default case once the world is entirely filled with chunks, but not for now.
+        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
+            usize chunk_x = chunk_idx % WORLD_W;
+            usize chunk_z = chunk_idx / WORLD_W;
+            v3 chunk_bb_min = {(f32)(chunk_x*CHUNK_W), 0, (f32)(chunk_z*CHUNK_W)};
+            v3 chunk_bb_max = {(f32)((chunk_x+1)*CHUNK_W), CHUNK_W, (f32)((chunk_z+1)*CHUNK_W)};
 
-    usize block_idx;
-    if (should_remove_block && raycast_chunk_traversal(&game_state->chunk, traversal_origin, camera_forward, &block_idx)) {
-        game_state->chunk.data[block_idx] = 0;
-        // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
-        // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
-        // i.e. generate the mesh but only upload it after the previous frame is rendered. Perhaps in a separate thread.
-        platform_api->waitForGPU(gpu_context);
-        refreshChunk(gpu_context, platform_api, &game_state->chunk, game_state->chunk_upload_buffer, game_state->chunk_vertex_buffer);
+            if (point_inclusion_aabb(game_state->player_position, chunk_bb_min, chunk_bb_max)) {
+                chunk_to_traverse = chunk_idx;
+                traversal_origin = game_state->player_position;
+                found_chunk = true;
+                break;
+            }
+        }
+
+        f32 minimum_t = 0.0;
+        // TODO: We should have a termination condition here just in case. Maybe based on minimum_t ?
+        while (true) {
+
+            // NOTE: If a chunk to traverse was not set during init, meaning the player is not inside a chunk,
+            // we need to look for one. We increment the minimum_t variable every time we intersect with a chunk
+            // so that each iteration traverses the next chunk along the line of sight, until a block is found.
+            f32 closest_t_during_search = INFINITY;
+            if (!found_chunk) {
+                for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
+                    usize chunk_x = chunk_idx % WORLD_W;
+                    usize chunk_z = chunk_idx / WORLD_W;
+                    v3 chunk_bb_min = {(f32)(chunk_x*CHUNK_W), 0, (f32)(chunk_z*CHUNK_W)};
+                    v3 chunk_bb_max = {(f32)((chunk_x+1)*CHUNK_W), CHUNK_W, (f32)((chunk_z+1)*CHUNK_W)};
+
+                    f32 hit_t;
+                    b32 did_hit = raycast_aabb(game_state->player_position, camera_forward, chunk_bb_min, chunk_bb_max, &hit_t);
+
+                    if (did_hit && hit_t < closest_t_during_search && hit_t > minimum_t) {
+                        closest_t_during_search = hit_t;
+                        chunk_to_traverse = chunk_idx;
+                        found_chunk = true;
+                    }
+                }
+
+                if (found_chunk) {
+                    // NOTE: Update the minimum_t so that if no block is found in this chunk, we can look into the
+                    // next furthest chunk next iteration.
+                    traversal_origin = game_state->player_position + camera_forward * closest_t_during_search;
+                    minimum_t = closest_t_during_search;
+                }
+            }
+
+            if (found_chunk) {
+                usize chunk_x = chunk_to_traverse % WORLD_W;
+                usize chunk_z = chunk_to_traverse / WORLD_W;
+                v3 chunk_to_traverse_origin = v3 {(f32)(chunk_x * CHUNK_W), 0, (f32)(chunk_z * CHUNK_W)};
+                v3 intersection_relative = traversal_origin - chunk_to_traverse_origin;
+
+                usize block_idx;
+                if (raycast_chunk_traversal(&game_state->world[chunk_to_traverse], intersection_relative, camera_forward, &block_idx)) {
+                    game_state->world[chunk_to_traverse].data[block_idx] = 0;
+                    // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
+                    // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
+                    // i.e. generate the mesh but only upload it after the previous frame is rendered. Perhaps in a separate thread.
+                    platform_api->waitForGPU(gpu_context);
+                    refreshChunk(gpu_context, platform_api, &game_state->world[chunk_to_traverse]);
+                    break;
+                }
+
+                // NOTE: This is confusing but I can't think of a better place to put it.
+                // When we arrive here, it means the raycast found a chunk but that it didn't have any solid block
+                // along the line. So we need to find a new one during the next iteration.
+                found_chunk = false;
+            } else {
+                break;
+            }
+        }
     }
 
     // RENDERING
@@ -394,7 +456,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
     f32 clear_color[] = {0.1, 0.1, 0.2, 1};
     platform_api->recordClearCommand(gpu_context, cmd_buf, clear_color);
 
-    m4 chunk_model = makeTranslation(0, 0, 0);
+
     m4 camera_matrix = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + camera_forward);
 
     if (game_state->is_wireframe) {
@@ -405,11 +467,17 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         platform_api->setPipeline(cmd_buf, game_state->chunk_render_pipeline);
     }
 
-    platform_api->pushConstant(cmd_buf, 0, chunk_model.data, sizeof(m4));
     platform_api->pushConstant(cmd_buf, 1, camera_matrix.data, sizeof(m4));
 
-    platform_api->setVertexBuffer(cmd_buf, game_state->chunk_vertex_buffer);
-    platform_api->drawCall(cmd_buf, game_state->chunk.vertices_count);
+    for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
+        usize chunk_x = chunk_idx % WORLD_W;
+        usize chunk_z = chunk_idx / WORLD_W;
+
+        m4 chunk_model = makeTranslation(chunk_x * CHUNK_W, 0, chunk_z * CHUNK_W);
+        platform_api->pushConstant(cmd_buf, 0, chunk_model.data, sizeof(m4));
+        platform_api->setVertexBuffer(cmd_buf, game_state->world[chunk_idx].vertex_buffer);
+        platform_api->drawCall(cmd_buf, game_state->world[chunk_idx].vertices_count);
+    }
 
     platform_api->sendCommandBufferAndPresent(gpu_context, cmd_buf);
 
