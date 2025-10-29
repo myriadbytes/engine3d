@@ -237,7 +237,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassA(&window_class);
 
     HWND window = CreateWindowExA(
-        /* behavior */ 0,
+        /* behavior */ WS_EX_TOPMOST,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,

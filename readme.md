@@ -26,6 +26,7 @@ Running the `build.py` file should just work, provided you have `clang.exe` on y
 
 - WASD: Horizontal movement
 - Q/E: Vertical movement
+- LEFT SHIFT: Sprint
 - SPACE: Remove block
 
 ## Game code hot-reloading:

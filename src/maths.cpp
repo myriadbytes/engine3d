@@ -1,3 +1,7 @@
+// TODO: It could be interesting to not even include math.h, and instead
+// roll our own math functions. It depends on whether or not this would
+// require too much math knowledge or if it's at least somewhat possible to
+// learn in a couple of days.
 #include "maths.h"
 
 m4 lookAt(v3 eye, v3 target) {

@@ -21,7 +21,7 @@ generate_compile_commands = True
 # FILES
 platform_source_files = ["src/win32_platform.cpp", "src/win32_gpu.cpp"]
 game_source_files = ["src/game.cpp"]
-common_source_files = ["src/arena.cpp", "src/maths.cpp"]
+common_source_files = ["src/arena.cpp", "src/maths.cpp", "src/noise.cpp"]
 
 lib_directories = ["firstparty/Microsoft/lib/x64"]
 assets_directories = ["shaders"]

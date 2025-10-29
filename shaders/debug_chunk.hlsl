@@ -21,10 +21,7 @@ VSOutput VSMain(float3 position : POSITION, float3 normal : NORMAL)
 
     result.position = mul(camera, mul(model, float4(position, 1)));
 
-    result.color.r = (position.x / 16);
-    result.color.g = (position.y / 16);
-    result.color.b = (position.z / 16);
-    result.color.a = 1;
+    result.color = float4(1, 1, 1, 1);
 
     result.normal = normal;
 
@@ -33,7 +30,7 @@ VSOutput VSMain(float3 position : POSITION, float3 normal : NORMAL)
 
 float4 PSMain(VSOutput input) : SV_TARGET
 {
-    float3 fake_light_dir = normalize(float3(-.7, 1, -1.9));
+    float3 fake_light_dir = normalize(float3(-.7, 1.2, -1.9));
     float diffuse = max(dot(input.normal, fake_light_dir), 0.0);
     float ambient = 0.2;
 

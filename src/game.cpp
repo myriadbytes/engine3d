@@ -1,4 +1,5 @@
 #include "game_api.h"
+#include "noise.h"
 
 constexpr usize CHUNK_W = 16;
 
@@ -19,7 +20,9 @@ struct Chunk {
 };
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
-// Also look into switching to greedy meshing.
+// TODO: Currently the chunk doesn't look into neighboring chunks. This means there are generated
+// triangles between solid blocks on two different chunks.
+// TODO: Look into switching to greedy meshing.
 void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count) {
     usize emitted = 0;
     for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
@@ -287,15 +290,28 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->frame_arena.base = game_state->frame_arena_memory;
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
-        game_state->player_position = {0, 5, -5};
+        game_state->player_position = {0, 40, 0};
         game_state->time = 0;
-        game_state->camera_yaw = 3 * PI32 / 2;
+        game_state->camera_pitch = -1 * PI32 / 6;
+        game_state->camera_yaw = 1 * PI32 / 3;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
 
         for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
-            for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
-                if (randomNextU32(&game_state->random_series) % 16 == 0) {
-                    game_state->world[chunk_idx].data[i] = 1;
+
+            usize chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
+            usize chunk_origin_y = 0;
+            usize chunk_origin_z = (chunk_idx / WORLD_W) * CHUNK_W;\
+
+            for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
+                usize block_x = chunk_origin_x + (block_idx % CHUNK_W);
+                usize block_y = chunk_origin_y + (block_idx / CHUNK_W) % (CHUNK_W);
+                usize block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
+
+                f32 scaling_factor = 0.01;
+                f32 height = ((simplex_noise_2d((f32)block_x * scaling_factor, (f32) block_z * scaling_factor) + 1.f) / 2.f) * CHUNK_W;
+
+                if (block_y <= height) {
+                    game_state->world[chunk_idx].data[block_idx] = 1;
                 }
             }
 
@@ -365,6 +381,12 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
 
     if (input->kb.keys[SCANCODE_G].is_down && input->kb.keys[SCANCODE_G].transitions == 1) {
         game_state->is_wireframe = !game_state->is_wireframe;
+    }
+
+    // FIXME: Reinitializing the game like that leaks EVERYTHING. Oops !
+    // The game crashes after a few times because we keep allocating new VRAM buffers.
+    if (input->kb.keys[SCANCODE_R].is_down && input->kb.keys[SCANCODE_R].transitions == 1) {
+        memory->is_initialized = false;
     }
 
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
