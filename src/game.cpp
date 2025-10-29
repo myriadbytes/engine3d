@@ -263,6 +263,8 @@ struct GameState {
     f32 camera_pitch;
     f32 camera_yaw;
     v3 player_position;
+    v3 camera_forward;
+    b32 orbit_mode;
 
     Chunk world[WORLD_W * WORLD_W];
 
@@ -292,6 +294,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
         game_state->player_position = {0, 40, 0};
+        game_state->orbit_mode = false;
         game_state->time = 0;
         game_state->camera_pitch = -1 * PI32 / 6;
         game_state->camera_yaw = 1 * PI32 / 3;
@@ -309,8 +312,17 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                 usize block_y = chunk_origin_y + (block_idx / CHUNK_W) % (CHUNK_W);
                 usize block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
 
-                f32 scaling_factor = 0.01;
-                f32 height = ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * scaling_factor, (f32) block_z * scaling_factor) + 1.f) / 2.f) * CHUNK_W;
+                // TODO: This needs to be parameterized and put into a function.
+                // The fancy name is "fractal brownian motion", but it's just summing
+                // noise layers with reducing intensity and increasing frequency.
+                f32 space_scaling_factor = 0.01;
+                f32 height_intensity = 10.0;
+                f32 height = 0;
+                for (i32 octave = 0; octave < 3; octave ++) {
+                    height += ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
+                    space_scaling_factor *= 2.f;
+                    height_intensity /= 2.f;
+                }
 
                 if (block_y <= height) {
                     game_state->world[chunk_idx].data[block_idx] = 1;
@@ -340,55 +352,64 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
     // SIMULATION
     game_state->time += dt;
 
-    f32 sensitivity = 0.01;
-    game_state->camera_pitch += input->kb.mouse_delta.y * sensitivity;
-    game_state->camera_yaw += input->kb.mouse_delta.x * sensitivity;
+    if (!game_state->orbit_mode) {
+        f32 sensitivity = 0.01;
+        game_state->camera_pitch += input->kb.mouse_delta.y * sensitivity;
+        game_state->camera_yaw += input->kb.mouse_delta.x * sensitivity;
 
-    f32 safe_pitch = PI32 / 2.f - 0.1f;
-    game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
+        f32 safe_pitch = PI32 / 2.f - 0.1f;
+        game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
 
-    v3 camera_forward = {};
-    camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
-    camera_forward.y = sinf(game_state->camera_pitch);
-    camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
 
-    v3 camera_right = normalize(cross(camera_forward, {0, 1, 0}));
+        game_state->camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
+        game_state->camera_forward.y = sinf(game_state->camera_pitch);
+        game_state->camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
 
-    f32 speed = 20 * dt;
-    if (input->kb.keys[SCANCODE_LSHIFT].is_down) {
-        speed *= 5;
-    }
+        v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
 
-    // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
-    // Let's just say it's a Quake reference.
+        f32 speed = 20 * dt;
+        if (input->kb.keys[SCANCODE_LSHIFT].is_down) {
+            speed *= 5;
+        }
 
-    if(input->kb.keys[SCANCODE_Q].is_down) {
-        game_state->player_position.y -= speed;
-    }
-    if(input->kb.keys[SCANCODE_E].is_down) {
-        game_state->player_position.y += speed;
-    }
-    if(input->kb.keys[SCANCODE_A].is_down) {
-        game_state->player_position += -camera_right * speed;
-    }
-    if(input->kb.keys[SCANCODE_D].is_down) {
-        game_state->player_position += camera_right * speed;
-    }
-    if(input->kb.keys[SCANCODE_S].is_down) {
-        game_state->player_position += -camera_forward * speed;
-    }
-    if(input->kb.keys[SCANCODE_W].is_down) {
-        game_state->player_position += camera_forward * speed;
+        // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
+        // Let's just say it's a Quake reference.
+
+        if(input->kb.keys[SCANCODE_Q].is_down) {
+            game_state->player_position.y -= speed;
+        }
+        if(input->kb.keys[SCANCODE_E].is_down) {
+            game_state->player_position.y += speed;
+        }
+        if(input->kb.keys[SCANCODE_A].is_down) {
+            game_state->player_position += -camera_right * speed;
+        }
+        if(input->kb.keys[SCANCODE_D].is_down) {
+            game_state->player_position += camera_right * speed;
+        }
+        if(input->kb.keys[SCANCODE_S].is_down) {
+            game_state->player_position += -game_state->camera_forward * speed;
+        }
+        if(input->kb.keys[SCANCODE_W].is_down) {
+            game_state->player_position += game_state->camera_forward * speed;
+        }
+    } else {
+        f32 orbit_speed = 1.f;
+        f32 orbit_distance = 80.f;
+        f32 orbit_height = 50.f;
+        v3 orbit_center = v3 { ((f32)WORLD_W/2) * CHUNK_W, 0, ((f32)WORLD_W/2) * CHUNK_W };
+
+        f32 orbit_t = game_state->time * orbit_speed;
+        game_state->player_position = orbit_center + v3 {cosf(orbit_t) * orbit_distance, orbit_height, sinf(orbit_t) * orbit_distance};
+        game_state->camera_forward = normalize(orbit_center - game_state->player_position);
     }
 
     if (input->kb.keys[SCANCODE_G].is_down && input->kb.keys[SCANCODE_G].transitions == 1) {
         game_state->is_wireframe = !game_state->is_wireframe;
     }
 
-    // FIXME: Reinitializing the game like that leaks EVERYTHING. Oops !
-    // The game crashes after a few times because we keep allocating new VRAM buffers.
-    if (input->kb.keys[SCANCODE_R].is_down && input->kb.keys[SCANCODE_R].transitions == 1) {
-        memory->is_initialized = false;
+    if (input->kb.keys[SCANCODE_O].is_down && input->kb.keys[SCANCODE_O].transitions == 1) {
+        game_state->orbit_mode = !game_state->orbit_mode;
     }
 
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
@@ -431,7 +452,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                     v3 chunk_bb_max = {(f32)((chunk_x+1)*CHUNK_W), CHUNK_W, (f32)((chunk_z+1)*CHUNK_W)};
 
                     f32 hit_t;
-                    b32 did_hit = raycast_aabb(game_state->player_position, camera_forward, chunk_bb_min, chunk_bb_max, &hit_t);
+                    b32 did_hit = raycast_aabb(game_state->player_position, game_state->camera_forward, chunk_bb_min, chunk_bb_max, &hit_t);
 
                     if (did_hit && hit_t < closest_t_during_search && hit_t > minimum_t) {
                         closest_t_during_search = hit_t;
@@ -443,7 +464,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                 if (found_chunk) {
                     // NOTE: Update the minimum_t so that if no block is found in this chunk, we can look into the
                     // next furthest chunk next iteration.
-                    traversal_origin = game_state->player_position + camera_forward * closest_t_during_search;
+                    traversal_origin = game_state->player_position + game_state->camera_forward * closest_t_during_search;
                     minimum_t = closest_t_during_search;
                 }
             }
@@ -455,7 +476,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                 v3 intersection_relative = traversal_origin - chunk_to_traverse_origin;
 
                 usize block_idx;
-                if (raycast_chunk_traversal(&game_state->world[chunk_to_traverse], intersection_relative, camera_forward, &block_idx)) {
+                if (raycast_chunk_traversal(&game_state->world[chunk_to_traverse], intersection_relative, game_state->camera_forward, &block_idx)) {
                     game_state->world[chunk_to_traverse].data[block_idx] = 0;
                     // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
                     // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
@@ -480,8 +501,7 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
     f32 clear_color[] = {0.1, 0.1, 0.2, 1};
     platform_api->recordClearCommand(gpu_context, cmd_buf, clear_color);
 
-
-    m4 camera_matrix = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + camera_forward);
+    m4 camera_matrix = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
 
     if (game_state->is_wireframe) {
         platform_api->setPipeline(cmd_buf, game_state->wireframe_render_pipeline);
