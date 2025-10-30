@@ -3,6 +3,9 @@
 
 constexpr usize CHUNK_W = 16;
 
+constexpr usize WORLD_W = 16;
+constexpr usize WORLD_H = 2;
+
 // NOTE: This is the worst case number of vertices that would be needed for a chunk mesh (with a "checkerboard" chunk).
 // This stops being true once we add transparent blocks. Too bad !
 constexpr usize WORST_CASE_CHUNK_VERTICES = ((CHUNK_W * CHUNK_W * CHUNK_W) / 2) * 6 * 2 * 3;
@@ -253,8 +256,6 @@ void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* ch
     platform_api->blockingUploadToGPUBuffer(gpu_context, chunk->upload_buffer, chunk->vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
 }
 
-constexpr usize WORLD_W = 8;
-
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -266,7 +267,7 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    Chunk world[WORLD_W * WORLD_W];
+    Chunk world[WORLD_W * WORLD_H * WORLD_W];
 
     GPU_Pipeline* chunk_render_pipeline;
     GPU_Pipeline* wireframe_render_pipeline;
@@ -301,22 +302,22 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
 
-        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
+        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
 
-            usize chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
-            usize chunk_origin_y = 0;
-            usize chunk_origin_z = (chunk_idx / WORLD_W) * CHUNK_W;\
+            u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
+            u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
+            u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
 
             for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
-                usize block_x = chunk_origin_x + (block_idx % CHUNK_W);
-                usize block_y = chunk_origin_y + (block_idx / CHUNK_W) % (CHUNK_W);
-                usize block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
+                u32 block_x = chunk_origin_x + (block_idx % CHUNK_W);
+                u32 block_y = chunk_origin_y + (block_idx / CHUNK_W) % (CHUNK_W);
+                u32 block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
 
                 // TODO: This needs to be parameterized and put into a function.
                 // The fancy name is "fractal brownian motion", but it's just summing
                 // noise layers with reducing intensity and increasing frequency.
                 f32 space_scaling_factor = 0.01;
-                f32 height_intensity = 10.0;
+                f32 height_intensity = 20.0;
                 f32 height = 0;
                 for (i32 octave = 0; octave < 3; octave ++) {
                     height += ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
@@ -357,9 +358,8 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->camera_pitch += input->kb.mouse_delta.y * sensitivity;
         game_state->camera_yaw += input->kb.mouse_delta.x * sensitivity;
 
-        f32 safe_pitch = PI32 / 2.f - 0.1f;
+        f32 safe_pitch = PI32 / 2.f - 0.05f;
         game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
-
 
         game_state->camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
         game_state->camera_forward.y = sinf(game_state->camera_pitch);
@@ -422,11 +422,13 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
 
         // NOTE: If the player is inside a chunk already, we don't have to do a raycast the first time.
         // This would be the default case once the world is entirely filled with chunks, but not for now.
-        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
-            usize chunk_x = chunk_idx % WORLD_W;
-            usize chunk_z = chunk_idx / WORLD_W;
-            v3 chunk_bb_min = {(f32)(chunk_x*CHUNK_W), 0, (f32)(chunk_z*CHUNK_W)};
-            v3 chunk_bb_max = {(f32)((chunk_x+1)*CHUNK_W), CHUNK_W, (f32)((chunk_z+1)*CHUNK_W)};
+        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
+            u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
+            u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
+            u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
+
+            v3 chunk_bb_min = {(f32)(chunk_origin_x), (f32)(chunk_origin_y), (f32)(chunk_origin_z)};
+            v3 chunk_bb_max = {(f32)(chunk_origin_x+CHUNK_W), (f32)(chunk_origin_y+CHUNK_W), (f32)(chunk_origin_z+CHUNK_W)};
 
             if (point_inclusion_aabb(game_state->player_position, chunk_bb_min, chunk_bb_max)) {
                 chunk_to_traverse = chunk_idx;
@@ -445,11 +447,13 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
             // so that each iteration traverses the next chunk along the line of sight, until a block is found.
             f32 closest_t_during_search = INFINITY;
             if (!found_chunk) {
-                for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
-                    usize chunk_x = chunk_idx % WORLD_W;
-                    usize chunk_z = chunk_idx / WORLD_W;
-                    v3 chunk_bb_min = {(f32)(chunk_x*CHUNK_W), 0, (f32)(chunk_z*CHUNK_W)};
-                    v3 chunk_bb_max = {(f32)((chunk_x+1)*CHUNK_W), CHUNK_W, (f32)((chunk_z+1)*CHUNK_W)};
+                for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
+                    u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
+                    u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
+                    u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
+
+                    v3 chunk_bb_min = {(f32)(chunk_origin_x), (f32)(chunk_origin_y), (f32)(chunk_origin_z)};
+                    v3 chunk_bb_max = {(f32)(chunk_origin_x+CHUNK_W), (f32)(chunk_origin_y+CHUNK_W), (f32)(chunk_origin_z+CHUNK_W)};
 
                     f32 hit_t;
                     b32 did_hit = raycast_aabb(game_state->player_position, game_state->camera_forward, chunk_bb_min, chunk_bb_max, &hit_t);
@@ -470,9 +474,11 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
             }
 
             if (found_chunk) {
-                usize chunk_x = chunk_to_traverse % WORLD_W;
-                usize chunk_z = chunk_to_traverse / WORLD_W;
-                v3 chunk_to_traverse_origin = v3 {(f32)(chunk_x * CHUNK_W), 0, (f32)(chunk_z * CHUNK_W)};
+                u32 chunk_origin_x = (chunk_to_traverse % WORLD_W) * CHUNK_W;
+                u32 chunk_origin_y = ((chunk_to_traverse / WORLD_W) % WORLD_H) * CHUNK_W;
+                u32 chunk_origin_z = (chunk_to_traverse / (WORLD_W * WORLD_H)) * CHUNK_W;
+
+                v3 chunk_to_traverse_origin = v3 {(f32)chunk_origin_x, (f32)chunk_origin_y, (f32)chunk_origin_z};
                 v3 intersection_relative = traversal_origin - chunk_to_traverse_origin;
 
                 usize block_idx;
@@ -513,11 +519,12 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
 
     platform_api->pushConstant(cmd_buf, 1, camera_matrix.data, sizeof(m4));
 
-    for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_W; chunk_idx++) {
-        usize chunk_x = chunk_idx % WORLD_W;
-        usize chunk_z = chunk_idx / WORLD_W;
+    for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
+        u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
+        u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
+        u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
 
-        m4 chunk_model = makeTranslation(chunk_x * CHUNK_W, 0, chunk_z * CHUNK_W);
+        m4 chunk_model = makeTranslation(v3 {(f32)chunk_origin_x, (f32)chunk_origin_y, (f32)chunk_origin_z});
         platform_api->pushConstant(cmd_buf, 0, chunk_model.data, sizeof(m4));
         platform_api->setVertexBuffer(cmd_buf, game_state->world[chunk_idx].vertex_buffer);
         platform_api->drawCall(cmd_buf, game_state->world[chunk_idx].vertices_count);

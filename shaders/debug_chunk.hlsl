@@ -19,11 +19,12 @@ VSOutput VSMain(float3 position : POSITION, float3 normal : NORMAL)
 {
     VSOutput result;
 
-    result.position = mul(camera, mul(model, float4(position, 1)));
+    float4 world_pos = mul(model, float4(position, 1));
+    result.position = mul(camera, world_pos);
 
     float4 mountain_color = float4(1, 1, 1, 1);
     float4 grass_color = float4(0.3, 0.4, 0.3, 1);
-    float t = pow(position.y / 16.0, 4);
+    float t = pow(world_pos.y / 32, 4);
     result.color = lerp(grass_color, mountain_color, t);
 
     result.normal = normal;
