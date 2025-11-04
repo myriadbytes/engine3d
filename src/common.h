@@ -27,8 +27,7 @@ typedef int32_t b32;
 #if ENGINE_SLOW
     #define ASSERT(expr)\
         if (!(expr)) {\
-            volatile u8* ptr = (u8*)(0);\
-            *ptr = 0;\
+            __builtin_debugtrap();\
         }
 #else
     #define ASSERT(expr) {}

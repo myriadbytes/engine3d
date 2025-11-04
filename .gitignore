@@ -1,5 +1,6 @@
 build/
 .zed/
+.helix/
 *.raddbg
 
 .clangd

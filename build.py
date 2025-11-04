@@ -11,7 +11,9 @@ compiler_flags = [
     "-fdiagnostics-absolute-paths",
     "-Wall",
     "-Wno-missing-braces",
-    "-std=c++17",
+    "-Wno-unused-variable",
+    "-std=c++20",
+    "-Wl,/LTCG",
 ]
 linker_flags = [""]
 syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "GameInput.lib"]
@@ -20,11 +22,11 @@ generate_compile_commands = True
 
 # FILES
 platform_source_files = ["src/win32_platform.cpp", "src/win32_gpu.cpp"]
-game_source_files = ["src/game.cpp"]
-common_source_files = ["src/arena.cpp", "src/maths.cpp", "src/noise.cpp"]
+game_source_files = ["src/game.cpp", "src/maths.cpp", "src/noise.cpp", "src/img.cpp"]
+common_source_files = ["src/arena.cpp"]
 
 lib_directories = ["firstparty/Microsoft/lib/x64"]
-assets_directories = ["shaders"]
+assets_directories = ["shaders", "assets"]
 
 # SETUP
 project_dir = Path(__file__).parent

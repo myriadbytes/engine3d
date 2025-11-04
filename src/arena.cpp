@@ -13,6 +13,16 @@ void* pushBytes(Arena* arena, usize size) {
     return memory;
 }
 
+void* pushZeros(Arena* arena, usize size) {
+    void* memory = pushBytes(arena, size);
+
+    for (usize i = 0; i < size; i++) {
+        ((u8*)memory)[i] = 0;
+    }
+
+    return memory;
+}
+
 void clearArena(Arena* arena) {
     arena->used = 0;
 }

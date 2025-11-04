@@ -1,5 +1,6 @@
 #include "game_api.h"
 #include "noise.h"
+#include "img.h"
 
 constexpr usize CHUNK_W = 16;
 
@@ -301,6 +302,10 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         game_state->camera_yaw = 1 * PI32 / 3;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
+
+        u32 w, h;
+        u8* bitmap_font = read_image(".\\assets\\monogram-bitmap.png", &w, &h, &game_state->static_arena, &game_state->frame_arena);
+        (void) bitmap_font;
 
         for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
 

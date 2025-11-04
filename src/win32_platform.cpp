@@ -299,7 +299,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
-        printTimingInfo(&timing_info);
+        // printTimingInfo(&timing_info);
 
         // NOTE: reload game code
         const char* dll_name = "game.dll";

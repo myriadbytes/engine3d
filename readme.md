@@ -38,6 +38,7 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 
 ### Engine:
 - [x] Game code hot-reloading
+- [x] Basic PNG decoder
 - [x] Keyboard & controller input processing (using the Windows 10+ GameInput lib)
 - [x] Generating `compile_commands.json` inside the build script
 - [ ] Shaders hot-reloading
@@ -54,6 +55,6 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 
 ### Game:
 - [ ] Chunk data streaming system
-- [ ] Procedular heightmap with perlin noise
+- [x] Procedular heightmap with simplex noise
 - [ ] Greedy meshing
 - [ ] Asynchronous GPU transfer for the meshes
