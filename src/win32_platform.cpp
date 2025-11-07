@@ -5,9 +5,7 @@
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
 #include <strsafe.h>
-#include "../firstparty/Microsoft/include/GameInput.h"
-
-using namespace GameInput::v3;
+#include <GameInput.h>
 
 #include "common.h"
 #include "input.h"

@@ -1,6 +1,6 @@
-from pathlib import Path
-import subprocess
 import shutil
+import subprocess
+from pathlib import Path
 
 # CONFIG
 exe_name = "win32_game.exe"
@@ -25,7 +25,6 @@ platform_source_files = ["src/win32_platform.cpp", "src/win32_gpu.cpp"]
 game_source_files = ["src/game.cpp", "src/maths.cpp", "src/noise.cpp", "src/img.cpp"]
 common_source_files = ["src/arena.cpp"]
 
-lib_directories = ["firstparty/Microsoft/lib/x64"]
 assets_directories = ["shaders", "assets"]
 
 # SETUP
@@ -50,9 +49,6 @@ common_sources_str = " ".join(
 platform_sources_str = " ".join(
     [str(project_dir / source) for source in platform_source_files]
 )
-libs_directories_str = " ".join(
-    [f'-L"{str(project_dir / lib_dir)}"' for lib_dir in lib_directories]
-)
 platform_output_str = f"-o {str(build_dir / exe_name)}"
 syslibs_str = " ".join([f"-l{name}" for name in syslibs])
 
@@ -63,7 +59,6 @@ platform_compile_cmd = f"clang \
 {common_sources_str} \
 {platform_output_str} \
 {linker_flags_str} \
-{libs_directories_str} \
 {syslibs_str} \
 "
 
