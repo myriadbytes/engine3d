@@ -20,12 +20,7 @@ Because it's fun ! Writing a complete codebase is also a great learning exercise
 Making everything from scratch also implies not relying on tools like CMake to handle the build process. This is thankfully much easier
 without dependencies to manage : the build script even generates a `compile_commands.json` file, so you get complete LSP functionality in your favorite
 `clangd`-compatible editor !
-Running the `build.py` file should just work, provided you have `clang.exe` on your PATH. You may also have to [install the GameInput SDK](https://learn.microsoft.com/en-us/gaming/gdk/docs/features/common/input/overviews/input-nuget) using :
-```
-winget install Microsoft.GameInput
-```
-
-
+Running the `build.py` file should just work, provided you have `clang.exe` on your PATH and the most recent version of the Windows 11 SDK (>= 10.0.26100) installed, due to the GameInput dependency.
 You can then run `build/win32_game.exe`.
 
 ## Controls:
