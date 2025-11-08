@@ -20,7 +20,9 @@ Because it's fun ! Writing a complete codebase is also a great learning exercise
 Making everything from scratch also implies not relying on tools like CMake to handle the build process. This is thankfully much easier
 without dependencies to manage : the build script even generates a `compile_commands.json` file, so you get complete LSP functionality in your favorite
 `clangd`-compatible editor !
-Running the `build.py` file should just work, provided you have `clang.exe` on your PATH and the most recent version of the Windows 11 SDK (>= 10.0.26100) installed, due to the GameInput dependency.
+
+Running the `build.py` file should just work, provided you have `clang.exe` on your PATH and the most recent version of the Windows 11 SDK (>= 10.0.26100), due to the GameInput dependency.
+
 You can then run `build/win32_game.exe`.
 
 ## Controls:
@@ -49,7 +51,6 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 - [ ] Looped input recording & playback
 - [ ] "Topmost" window mode (useful to keep the window on top of the editor while hot-reloading)
 - [x] Basic matrix math library
-- [ ] High level renderer API
 - [ ] Logging
 - [ ] UI & (bitmap) text rendering
 - [ ] Thread pool ?? For async asset streaming

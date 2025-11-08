@@ -11,17 +11,17 @@ compiler_flags = [
     "-fdiagnostics-absolute-paths",
     "-Wall",
     "-Wno-missing-braces",
-    "-Wno-unused-variable",
     "-std=c++20",
-    "-Wl,/LTCG",
+    "-Wl,/LTCG",  # windows linker flag to remove indirection in dll calls, makes debugging easier
+    "-DNOMINMAX=1",  # including <Windows.h> name-squats common identifiers if this is not defined
 ]
 linker_flags = [""]
-syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "GameInput.lib"]
+syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "gameinput.lib"]
 game_dll_exports = ["gameUpdate"]
 generate_compile_commands = True
 
 # FILES
-platform_source_files = ["src/win32_platform.cpp", "src/win32_gpu.cpp"]
+platform_source_files = ["src/win32_platform.cpp"]
 game_source_files = ["src/game.cpp", "src/maths.cpp", "src/noise.cpp", "src/img.cpp"]
 common_source_files = ["src/arena.cpp"]
 
@@ -91,6 +91,7 @@ game_compile_cmd = f"clang \
 -shared \
 {linker_flags_str} \
 {game_dll_exports_str} \
+{syslibs_str} \
 "
 
 print("BUILDING GAME DLL...")

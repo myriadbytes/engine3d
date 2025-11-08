@@ -1,5 +1,4 @@
 #include "img.h"
-#define NOMINMAX
 #include <Windows.h>
 #include <strsafe.h>
 
@@ -154,7 +153,6 @@ struct HuffmanEntry {
 
 HuffmanEntry* compute_huffman_table(u16* code_lengths, u32 code_lengths_count, Arena* table_arena) {
     constexpr u32 MAX_BITS = 16;
-    char printf_buffer[128];
 
     HuffmanEntry* table = (HuffmanEntry*)pushZeros(table_arena, HUFFMAN_TABLE_SIZE * sizeof(HuffmanEntry));
 
@@ -186,7 +184,12 @@ HuffmanEntry* compute_huffman_table(u16* code_lengths, u32 code_lengths_count, A
     // entries in the look-up table that begin with this code.
     for (u16 symbol = 0; symbol < code_lengths_count; symbol++) {
         u16 symbol_code_len = code_lengths[symbol];
-        ASSERT(symbol_code_len <= 9);
+
+        // NOTE: Check that the code for our symbol is less
+        // than 9 bits long. If not, we need to implement
+        // subtable creation :(
+        ASSERT(symbol_code_len <= HUFFMAN_LUT_BITS);
+
         if (symbol_code_len != 0) {
             u16 symbol_code = next_code[symbol_code_len];
             next_code[symbol_code_len]++;
@@ -214,9 +217,7 @@ HuffmanEntry* compute_huffman_table(u16* code_lengths, u32 code_lengths_count, A
             for (u16 fill = 0; fill < max; fill++) {
                 u16 key = reversed_code | (fill << symbol_code_len);
 
-                // NOTE: Check our key is indeed 9 bits.
-                // If not, we need to implement subtable creation :(
-                ASSERT(key <= 0b111111111);
+                ASSERT(key <= ((1 << HUFFMAN_LUT_BITS) - 1));
 
                 table[key].is_subtable = false;
                 table[key].length = symbol_code_len;
@@ -462,10 +463,13 @@ u8* read_image(const char* path, u32* w, u32* h, Arena* return_arena, Arena* scr
 
     u8 compression_method = CMF & 0xF;
     u8 compression_info = CMF >> 4;
+    USED(compression_info);
 
     u8 fcheck = FLG & 0x1F;
     u8 fdict = (FLG >> 5) & 1;
     u8 flevel = FLG >> 6;
+    USED(fcheck);
+    USED(flevel);
 
     // NOTE: Compression method has to be DEFLATE for PNG.
     if (compression_method != 8) {
@@ -624,7 +628,7 @@ u8* read_image(const char* path, u32* w, u32* h, Arena* return_arena, Arena* scr
     // begins with a byte that indicates the filter type used on this image.
     u32 final_image_size = image_width * image_height * 4;
     u8* final_image = (u8*) pushBytes(return_arena, final_image_size);
-    
+
     u32 stream_scanline_size = 1 + image_width * 4;
     u32 image_scanline_size = image_width * 4;
     for (u32 scanline = 0; scanline < image_height; scanline ++) {
@@ -691,5 +695,5 @@ u8* read_image(const char* path, u32* w, u32* h, Arena* return_arena, Arena* scr
     *w = image_width;
     *h = image_height;
 
-    return NULL;
+    return final_image;
 }

@@ -37,3 +37,5 @@ typedef int32_t b32;
 #define MEGABYTES(value) (KILOBYTES(value) * 1024LL)
 #define GIGABYTES(value) (MEGABYTES(value) * 1024LL)
 #define TERABYTES(value) (GIGABYTES(value) * 1024LL)
+
+#define USED(variable) (void)variable;

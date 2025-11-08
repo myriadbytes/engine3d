@@ -1,6 +1,510 @@
+#include <d3d12.h>
+#include <d3dcommon.h>
+#include <debugapi.h>
+#include <dxgi1_4.h>
+#include <d3dcompiler.h>
+
+#include "common.h"
 #include "game_api.h"
 #include "noise.h"
 #include "img.h"
+
+constexpr usize FRAMES_IN_FLIGHT = 2;
+
+struct D3DFrameContext {
+    ID3D12CommandAllocator* command_allocator;
+    ID3D12GraphicsCommandList* command_list;
+    ID3D12Resource* render_target_resource;
+    D3D12_CPU_DESCRIPTOR_HANDLE render_target_view_descriptor;
+    ID3D12Resource* depth_target_resource;
+    D3D12_CPU_DESCRIPTOR_HANDLE depth_target_view_descriptor;
+    ID3D12Fence* fence;
+    HANDLE fence_wait_event;
+    u64 fence_ready_value;
+};
+
+struct D3DContext {
+    HWND window;
+    ID3D12Debug* debug_interface;
+
+    ID3D12Device* device;
+    ID3D12CommandQueue* graphics_command_queue;
+
+    ID3D12CommandQueue* copy_command_queue;
+    ID3D12CommandAllocator* copy_allocator;
+    ID3D12GraphicsCommandList* copy_command_list;
+    ID3D12Fence* copy_fence;
+    HANDLE copy_fence_wait_event;
+    u64 copy_fence_ready_value;
+
+    IDXGISwapChain3* swapchain;
+
+    ID3D12DescriptorHeap* rtv_heap;
+    u32 rtv_descriptor_size;
+
+    ID3D12DescriptorHeap* dsv_heap;
+    u32 dsv_descriptor_size;
+
+    D3DFrameContext frames[FRAMES_IN_FLIGHT];
+    u32 current_frame_idx;
+};
+
+struct D3DPipeline {
+    ID3D12RootSignature* root_signature;
+    ID3D12PipelineState* pipeline_state;
+};
+
+D3DContext initializeD3D12(b32 debug_mode) {
+    // WARNING: This is error prone, but it's annoying to have to pass the HWND
+    // to the game layer just for that.
+    HWND window_handle = FindWindowA("Voxel Game Window Class", nullptr);
+
+    D3DContext context = {};
+    context.window = window_handle;
+
+    // FIXME: release all the COM objects.
+
+    if (debug_mode) {
+        HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
+        ASSERT(SUCCEEDED(debug_res));
+        context.debug_interface->EnableDebugLayer();
+    };
+
+    // NOTE: The factory is used to query for the right GPU device.
+    IDXGIFactory4* factory;
+    HRESULT factory_res = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    ASSERT(SUCCEEDED(factory_res));
+
+    IDXGIAdapter1* adapters[8] = {};
+    u32 adapters_count = 0;
+    for (u32 i = 0; i < ARRAY_COUNT(adapters); i++) {
+        HRESULT res = factory->EnumAdapters1(i, &adapters[i]);
+        if (res == DXGI_ERROR_NOT_FOUND) break;
+        adapters_count += 1;
+    }
+
+    // FIXME: this should look for the discrete GPU in priority
+    i32 hardware_adapter_id = -1;
+    for (u32 i = 0; i < adapters_count; i++) {
+        DXGI_ADAPTER_DESC1 desc;
+        HRESULT desc_res = adapters[i]->GetDesc1(&desc);
+        ASSERT(SUCCEEDED(desc_res));
+
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+
+        hardware_adapter_id = i;
+        OutputDebugStringW(desc.Description);
+        OutputDebugStringA("\n");
+        break;
+    }
+
+    ASSERT(hardware_adapter_id >= 0);
+
+    HRESULT creation_res = D3D12CreateDevice(adapters[hardware_adapter_id], D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&context.device));
+    ASSERT(SUCCEEDED(creation_res));
+
+    // NOTE: Create the graphics queue.
+    D3D12_COMMAND_QUEUE_DESC graphics_queue_desc = {};
+    graphics_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    HRESULT graphics_queue_res = context.device->CreateCommandQueue(&graphics_queue_desc, IID_PPV_ARGS(&context.graphics_command_queue));
+    ASSERT(SUCCEEDED(graphics_queue_res));
+
+    // NOTE: Create the copy queue, and all the command stuff since
+    // this queue is global and not (yet) per-frame.
+    D3D12_COMMAND_QUEUE_DESC copy_queue_desc = {};
+    copy_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+    HRESULT copy_queue_res = context.device->CreateCommandQueue(&copy_queue_desc, IID_PPV_ARGS(&context.copy_command_queue));
+    ASSERT(SUCCEEDED(copy_queue_res));
+    HRESULT copy_command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&context.copy_allocator));
+    ASSERT(SUCCEEDED(copy_command_allocator_res));
+    HRESULT copy_cmd_list_res = context.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, context.copy_allocator, NULL, IID_PPV_ARGS(&context.copy_command_list));
+    ASSERT(SUCCEEDED(copy_cmd_list_res));
+    HRESULT copy_close_res = context.copy_command_list->Close();
+    ASSERT(SUCCEEDED(copy_close_res));
+    HRESULT copy_fence_res = context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.copy_fence));
+    ASSERT(SUCCEEDED(copy_fence_res));
+    context.copy_fence_wait_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+
+    // NOTE: Get the swapchain from DXGI.
+    IDXGISwapChain1* legacy_swapchain;
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {};
+    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.BufferCount = FRAMES_IN_FLIGHT;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    HRESULT swapchain_res = factory->CreateSwapChainForHwnd(
+        context.graphics_command_queue,
+        window_handle,
+        &swapchain_desc,
+        NULL,
+        NULL,
+        &legacy_swapchain
+    );
+    ASSERT(SUCCEEDED(swapchain_res));
+    legacy_swapchain->QueryInterface(IID_PPV_ARGS(&context.swapchain));
+
+    // NOTE: Create a descriptor heap for our render target views.
+    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
+    rtv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
+    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rtv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    HRESULT rtv_heap_res = context.device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&context.rtv_heap));
+    ASSERT(SUCCEEDED(rtv_heap_res));
+    context.rtv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    // NOTE: Fill the heap with our 2 render target views.
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv_current_descriptor = context.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        // NOTE: We first get a ID3D12Resource (handle for the actual GPU memory of the swapchain)
+        // and then create a render target view from that.
+        HRESULT swapchain_buffer_res = context.swapchain->GetBuffer(frame_idx, IID_PPV_ARGS(&context.frames[frame_idx].render_target_resource));
+        ASSERT(SUCCEEDED(swapchain_buffer_res));
+
+        context.device->CreateRenderTargetView(context.frames[frame_idx].render_target_resource, NULL, rtv_current_descriptor);
+        context.frames[frame_idx].render_target_view_descriptor = rtv_current_descriptor;
+
+        rtv_current_descriptor.ptr += context.rtv_descriptor_size;
+    }
+
+    // NOTE: Kinda the same thing for depth buffers, except we need to create them since they are not managed by DXGI.
+    RECT client_rect;
+    GetClientRect(window_handle, &client_rect);
+
+    D3D12_RESOURCE_DESC depth_desc = {};
+    depth_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    depth_desc.Width = client_rect.right;
+    depth_desc.Height = client_rect.bottom;
+    depth_desc.DepthOrArraySize = 1;
+    depth_desc.MipLevels = 1;
+    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
+    depth_desc.SampleDesc.Count = 1;
+    depth_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12_CLEAR_VALUE clear_value = {};
+    clear_value.Format = DXGI_FORMAT_D32_FLOAT;
+    clear_value.DepthStencil.Depth = 1.0f;
+    clear_value.DepthStencil.Stencil = 0;
+
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        D3D12_HEAP_PROPERTIES depth_heap_props = {};
+        depth_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+        depth_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        depth_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        depth_heap_props.CreationNodeMask = 1;
+        depth_heap_props.VisibleNodeMask = 1;
+
+        HRESULT heap_creation_result = context.device->CreateCommittedResource(
+            &depth_heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &depth_desc,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &clear_value,
+            IID_PPV_ARGS(&context.frames[frame_idx].depth_target_resource)
+        );
+        ASSERT(SUCCEEDED(heap_creation_result));
+    }
+
+    // NOTE: Create a descriptor heap for our depth/stencil views.
+    D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
+    dsv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
+    dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    dsv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    HRESULT dsv_heap_res = context.device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&context.dsv_heap));
+    ASSERT(SUCCEEDED(dsv_heap_res));
+    context.dsv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+
+    // NOTE: Fill the descriptor heap with our 2 depth buffer views.
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_heap_current_descriptor = context.dsv_heap->GetCPUDescriptorHandleForHeapStart();
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
+        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
+
+        context.device->CreateDepthStencilView(context.frames[frame_idx].depth_target_resource, &dsv_desc, dsv_heap_current_descriptor);
+        context.frames[frame_idx].depth_target_view_descriptor = dsv_heap_current_descriptor;
+
+        dsv_heap_current_descriptor.ptr += context.dsv_descriptor_size;
+    }
+
+    // NOTE: For each frame in flight, create a command allocator, list, and a fence to wait on.
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        HRESULT command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context.frames[frame_idx].command_allocator));
+        ASSERT(SUCCEEDED(command_allocator_res));
+    }
+
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        HRESULT cmd_list_res = context.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, context.frames[frame_idx].command_allocator, NULL, IID_PPV_ARGS(&context.frames[frame_idx].command_list));
+        ASSERT(SUCCEEDED(cmd_list_res));
+        HRESULT close_res = context.frames[frame_idx].command_list->Close();
+        ASSERT(SUCCEEDED(close_res));
+    }
+
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        HRESULT fence_res = context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.frames[frame_idx].fence));
+        ASSERT(SUCCEEDED(fence_res));
+
+        context.frames[frame_idx].fence_wait_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    }
+
+    // NOTE: Update the current frame index.
+    context.current_frame_idx = context.swapchain->GetCurrentBackBufferIndex();
+
+    return context;
+}
+
+// TODO: This should handle errors gracefully. Maybe a default shader enbedded in the exe ?
+void readAndCompileShaders(const char* path, ID3DBlob** vertex_shader, ID3DBlob** fragment_shader) {
+
+    // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
+    wchar_t windows_path[128];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, windows_path, ARRAY_COUNT(windows_path));
+
+    ID3DBlob* vertex_shader_compilation_err;
+    HRESULT vertex_shader_err = D3DCompileFromFile(windows_path, NULL, NULL, "VSMain", "vs_5_0", 0, 0, vertex_shader, &vertex_shader_compilation_err);
+    if (vertex_shader_compilation_err) {
+        OutputDebugStringA((char*)vertex_shader_compilation_err->GetBufferPointer());
+    }
+    ASSERT(SUCCEEDED(vertex_shader_err));
+
+    ID3DBlob* fragment_shader_compilation_err;
+    HRESULT fragment_shader_err = D3DCompileFromFile(windows_path, NULL, NULL, "PSMain", "ps_5_0", 0, 0, fragment_shader, &fragment_shader_compilation_err);
+    if (fragment_shader_compilation_err) {
+        OutputDebugStringA((char*)fragment_shader_compilation_err->GetBufferPointer());
+    }
+    ASSERT(SUCCEEDED(fragment_shader_err));
+}
+
+
+void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipeline, D3DPipeline* wireframe_pipeline) {
+        ID3DBlob* chunk_vertex_shader;
+        ID3DBlob* chunk_fragment_shader;
+        readAndCompileShaders("./shaders/debug_chunk.hlsl", &chunk_vertex_shader, &chunk_fragment_shader);
+
+        ID3DBlob* wireframe_vertex_shader;
+        ID3DBlob* wireframe_fragment_shader;
+        readAndCompileShaders("./shaders/solid_color.hlsl", &wireframe_vertex_shader, &wireframe_fragment_shader);
+
+        // NOTE: Root signature with 2 constants :
+        // - Model matrix
+        // - Fused perspective * view matrix
+        D3D12_ROOT_PARAMETER chunk_root_parameters[2];
+        chunk_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        chunk_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        chunk_root_parameters[0].Constants.Num32BitValues = 16;
+        chunk_root_parameters[0].Constants.ShaderRegister = 0;
+        chunk_root_parameters[0].Constants.RegisterSpace = 0;
+        chunk_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        chunk_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        chunk_root_parameters[1].Constants.Num32BitValues = 16;
+        chunk_root_parameters[1].Constants.ShaderRegister = 1;
+        chunk_root_parameters[1].Constants.RegisterSpace = 0;
+
+        D3D12_ROOT_SIGNATURE_DESC chunk_root_signature_desc = {};
+        chunk_root_signature_desc.NumParameters = ARRAY_COUNT(chunk_root_parameters);
+        chunk_root_signature_desc.pParameters = chunk_root_parameters;
+        chunk_root_signature_desc.NumStaticSamplers = 0;
+        chunk_root_signature_desc.pStaticSamplers = NULL;
+        chunk_root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        ID3DBlob* chunk_serialized_signature;
+        ID3DBlob* chunk_serialize_err;
+        D3D12SerializeRootSignature(&chunk_root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &chunk_serialized_signature, &chunk_serialize_err);
+        if (chunk_serialize_err) {
+            OutputDebugStringA((char*)chunk_serialize_err->GetBufferPointer());
+        }
+        ASSERT(chunk_serialize_err == NULL);
+        HRESULT chunk_signature_res = d3d_context->device->CreateRootSignature(0, chunk_serialized_signature->GetBufferPointer(), chunk_serialized_signature->GetBufferSize(), IID_PPV_ARGS(&chunk_pipeline->root_signature));
+        ASSERT(SUCCEEDED(chunk_signature_res));
+
+
+        // NOTE: Root signature with 3 constants :
+        // - Model matrix
+        // - Fused perspective * view matrix
+        // - Wireframe color
+        D3D12_ROOT_PARAMETER wireframe_root_parameters[3];
+        wireframe_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        wireframe_root_parameters[0].Constants.Num32BitValues = 16;
+        wireframe_root_parameters[0].Constants.ShaderRegister = 0;
+        wireframe_root_parameters[0].Constants.RegisterSpace = 0;
+        wireframe_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        wireframe_root_parameters[1].Constants.Num32BitValues = 16;
+        wireframe_root_parameters[1].Constants.ShaderRegister = 1;
+        wireframe_root_parameters[1].Constants.RegisterSpace = 0;
+        wireframe_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        wireframe_root_parameters[2].Constants.Num32BitValues = 4;
+        wireframe_root_parameters[2].Constants.ShaderRegister = 2;
+        wireframe_root_parameters[2].Constants.RegisterSpace = 0;
+
+        D3D12_ROOT_SIGNATURE_DESC wireframe_root_signature_desc = {};
+        wireframe_root_signature_desc.NumParameters = ARRAY_COUNT(wireframe_root_parameters);
+        wireframe_root_signature_desc.pParameters = wireframe_root_parameters;
+        wireframe_root_signature_desc.NumStaticSamplers = 0;
+        wireframe_root_signature_desc.pStaticSamplers = NULL;
+        wireframe_root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        ID3DBlob* wireframe_serialized_signature;
+        ID3DBlob* wireframe_serialize_err;
+        D3D12SerializeRootSignature(&wireframe_root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &wireframe_serialized_signature, &wireframe_serialize_err);
+        if (wireframe_serialize_err) {
+            OutputDebugStringA((char*)wireframe_serialize_err->GetBufferPointer());
+        }
+        ASSERT(wireframe_serialize_err == NULL);
+        HRESULT wireframe_signature_res = d3d_context->device->CreateRootSignature(0, wireframe_serialized_signature->GetBufferPointer(), wireframe_serialized_signature->GetBufferSize(), IID_PPV_ARGS(&wireframe_pipeline->root_signature));
+        ASSERT(SUCCEEDED(wireframe_signature_res));
+
+        // NOTE: The normal render pipeline and the wireframe pipeline use the same
+        // vertex buffers, so the same input stage config.
+        D3D12_INPUT_ELEMENT_DESC shared_input_descriptions[2];
+        shared_input_descriptions[0].SemanticName = "POSITION";
+        shared_input_descriptions[0].SemanticIndex = 0;
+        shared_input_descriptions[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+        shared_input_descriptions[0].InputSlot = 0;
+        shared_input_descriptions[0].AlignedByteOffset = 0;
+        shared_input_descriptions[0].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        shared_input_descriptions[0].InstanceDataStepRate = 0;
+
+        shared_input_descriptions[1].SemanticName = "NORMAL";
+        shared_input_descriptions[1].SemanticIndex = 0;
+        shared_input_descriptions[1].Format = DXGI_FORMAT_R32G32B32_FLOAT;
+        shared_input_descriptions[1].InputSlot = 0;
+        shared_input_descriptions[1].AlignedByteOffset = 3 * sizeof(f32);
+        shared_input_descriptions[1].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        shared_input_descriptions[1].InstanceDataStepRate = 0;
+
+        D3D12_RASTERIZER_DESC chunk_rasterizer_desc = {};
+        chunk_rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
+        chunk_rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
+        chunk_rasterizer_desc.FrontCounterClockwise = true;
+        chunk_rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        chunk_rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        chunk_rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        chunk_rasterizer_desc.DepthClipEnable = TRUE;
+        chunk_rasterizer_desc.MultisampleEnable = FALSE;
+        chunk_rasterizer_desc.AntialiasedLineEnable = FALSE;
+        chunk_rasterizer_desc.ForcedSampleCount = 0;
+        chunk_rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+        D3D12_RASTERIZER_DESC wireframe_rasterizer_desc = {};
+        wireframe_rasterizer_desc.FillMode = D3D12_FILL_MODE_WIREFRAME;
+        wireframe_rasterizer_desc.CullMode = D3D12_CULL_MODE_NONE;
+        wireframe_rasterizer_desc.FrontCounterClockwise = true;
+        wireframe_rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        wireframe_rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        wireframe_rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        wireframe_rasterizer_desc.DepthClipEnable = TRUE;
+        wireframe_rasterizer_desc.MultisampleEnable = FALSE;
+        wireframe_rasterizer_desc.AntialiasedLineEnable = FALSE;
+        wireframe_rasterizer_desc.ForcedSampleCount = 0;
+        wireframe_rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+        D3D12_BLEND_DESC shared_blend_desc = {};
+        shared_blend_desc.AlphaToCoverageEnable = FALSE;
+        shared_blend_desc.IndependentBlendEnable = FALSE;
+        shared_blend_desc.RenderTarget[0].BlendEnable = FALSE;
+        shared_blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
+        shared_blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+        shared_blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+        shared_blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        shared_blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        shared_blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+        shared_blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        shared_blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+        shared_blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        D3D12_DEPTH_STENCIL_DESC shared_depth_desc = {};
+        shared_depth_desc.DepthEnable = TRUE;
+        shared_depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        shared_depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        shared_depth_desc.StencilEnable = FALSE;
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC chunk_pipeline_desc = {};
+        chunk_pipeline_desc.InputLayout.pInputElementDescs = shared_input_descriptions;
+        chunk_pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(shared_input_descriptions);
+        chunk_pipeline_desc.pRootSignature = chunk_pipeline->root_signature;
+        chunk_pipeline_desc.VS.pShaderBytecode = chunk_vertex_shader->GetBufferPointer();
+        chunk_pipeline_desc.VS.BytecodeLength = chunk_vertex_shader->GetBufferSize();
+        chunk_pipeline_desc.PS.pShaderBytecode = chunk_fragment_shader->GetBufferPointer();
+        chunk_pipeline_desc.PS.BytecodeLength = chunk_fragment_shader->GetBufferSize();
+        chunk_pipeline_desc.RasterizerState = chunk_rasterizer_desc;
+        chunk_pipeline_desc.BlendState = shared_blend_desc;
+        chunk_pipeline_desc.DepthStencilState = shared_depth_desc;
+        chunk_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        chunk_pipeline_desc.SampleMask = UINT_MAX;
+        chunk_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        chunk_pipeline_desc.NumRenderTargets = 1;
+        chunk_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        chunk_pipeline_desc.SampleDesc.Count = 1;
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC wireframe_pipeline_desc = {};
+        wireframe_pipeline_desc.InputLayout.pInputElementDescs = shared_input_descriptions;
+        wireframe_pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(shared_input_descriptions);
+        wireframe_pipeline_desc.pRootSignature = wireframe_pipeline->root_signature;
+        wireframe_pipeline_desc.VS.pShaderBytecode = wireframe_vertex_shader->GetBufferPointer();
+        wireframe_pipeline_desc.VS.BytecodeLength = wireframe_vertex_shader->GetBufferSize();
+        wireframe_pipeline_desc.PS.pShaderBytecode = wireframe_fragment_shader->GetBufferPointer();
+        wireframe_pipeline_desc.PS.BytecodeLength = wireframe_fragment_shader->GetBufferSize();
+        wireframe_pipeline_desc.RasterizerState = wireframe_rasterizer_desc;
+        wireframe_pipeline_desc.BlendState = shared_blend_desc;
+        wireframe_pipeline_desc.DepthStencilState = shared_depth_desc;
+        wireframe_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        wireframe_pipeline_desc.SampleMask = UINT_MAX;
+        wireframe_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        wireframe_pipeline_desc.NumRenderTargets = 1;
+        wireframe_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        wireframe_pipeline_desc.SampleDesc.Count = 1;
+
+        HRESULT chunk_pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&chunk_pipeline_desc, IID_PPV_ARGS(&chunk_pipeline->pipeline_state));
+        ASSERT(SUCCEEDED(chunk_pipeline_res));
+        HRESULT wireframe_pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&wireframe_pipeline_desc, IID_PPV_ARGS(&wireframe_pipeline->pipeline_state));
+        ASSERT(SUCCEEDED(wireframe_pipeline_res));
+}
+
+void blockingUploadToGPUBuffer(D3DContext* d3d_context, ID3D12Resource* src_buffer, ID3D12Resource* dst_buffer, usize size) {
+    // NOTE: Wait for the previous upload to have completed.
+    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
+        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
+        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    }
+
+    // NOTE: Prepare the command buffer for recording.
+    HRESULT alloc_reset = d3d_context->copy_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = d3d_context->copy_command_list->Reset(d3d_context->copy_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
+
+    // NOTE: Signal to the driver that the destination buffer needs to be in a copy-ready state.
+    D3D12_RESOURCE_BARRIER to_copy_dst_barrier = {};
+    to_copy_dst_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    to_copy_dst_barrier.Transition.pResource = dst_buffer;
+    to_copy_dst_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    to_copy_dst_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+    to_copy_dst_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    d3d_context->copy_command_list->ResourceBarrier(1, &to_copy_dst_barrier);
+
+    // NOTE: This is the actual copy command.
+    d3d_context->copy_command_list->CopyBufferRegion(dst_buffer, 0, src_buffer, 0, size);
+
+    // NOTE: Close the command buffer and send it to the GPU for execution.
+    HRESULT close_res = d3d_context->copy_command_list->Close();
+    ASSERT(SUCCEEDED(close_res));
+    d3d_context->copy_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&d3d_context->copy_command_list);
+
+    // NOTE: Signal the copy fence once all commands on the copy queues have been executed.
+    d3d_context->copy_command_queue->Signal(d3d_context->copy_fence, ++d3d_context->copy_fence_ready_value);
+
+    // NOTE: Wait for the upload to have completed. This makes waiting at the beginning of the function technically
+    // redundant, but eh.
+    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
+        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
+        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    }
+}
 
 constexpr usize CHUNK_W = 16;
 
@@ -19,8 +523,9 @@ struct ChunkVertex {
 struct Chunk {
     u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
     usize vertices_count;
-    GPU_UploadBuffer* upload_buffer;
-    GPU_Buffer* vertex_buffer;
+    ID3D12Resource* upload_buffer;
+    ID3D12Resource* vertex_buffer;
+    b32 vbo_ready;
 };
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
@@ -244,23 +749,121 @@ b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_dire
     return false;
 }
 
-void refreshChunk(GPU_Context* gpu_context, PlatformAPI* platform_api, Chunk* chunk) {
+
+void refreshChunk(D3DContext* d3d_context, Chunk* chunk) {
 
     // NOTE: generate directly in the mapped upload buffer
-    ChunkVertex* buffer = (ChunkVertex*) platform_api->mapUploadBuffer(gpu_context, chunk->upload_buffer);
+    ChunkVertex* buffer;
+    D3D12_RANGE read_range = {};
+    // NOTE: Passing NULL as the read range would mean we are gonna read the entire
+    // buffer, but for optimization and simplicity's sake let's say that the user
+    // should not reading from a mapped upload buffer.
+    chunk->upload_buffer->Map(0, &read_range, (void**)&buffer);
 
     generateNaiveChunkMesh(chunk, buffer, &chunk->vertices_count);
 
-    platform_api->unmapUploadBuffer(gpu_context, chunk->upload_buffer);
-    // TODO: add a way to check that the number of generated vertices is not bigger than the upload and vertex buffers
+    // NOTE: Passing NULL as the write range signals to the driver that we
+    // we wrote the entire buffer.
+    chunk->upload_buffer->Unmap(0, NULL);
 
-    platform_api->blockingUploadToGPUBuffer(gpu_context, chunk->upload_buffer, chunk->vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
+    // TODO: add a way to check that the number of generated vertices is not bigger than the upload and vertex buffers
+    blockingUploadToGPUBuffer(d3d_context, chunk->upload_buffer, chunk->vertex_buffer, chunk->vertices_count * sizeof(ChunkVertex));
+
+    // NOTE: After the upload, the buffer is in COPY_DEST state, so it needs
+    // to be transitioned back into a vertex buffer.
+    chunk->vbo_ready = false;
+}
+
+void waitForGPU(D3DContext* d3d_context) {
+    D3DFrameContext* current_frame = &d3d_context->frames[d3d_context->current_frame_idx];
+
+    d3d_context->graphics_command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
+    if(current_frame->fence->GetCompletedValue() < current_frame->fence_ready_value) {
+        current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
+        WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
+    }
+
+    d3d_context->copy_command_queue->Signal(d3d_context->copy_fence, ++d3d_context->copy_fence_ready_value);
+    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
+        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
+        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    }
+}
+
+// TODO: I'm 99% sure that it is not necessary at all to have one upload buffer per
+// chunk. There should just be a pool of n upload buffers that all chunk share.
+void createChunkGPUBuffers(D3DContext* d3d_context, Chunk* chunk) {
+    
+    // NOTE: Creates a CPU-side heap + buffer that can be used to transfer data to the GPU
+    D3D12_HEAP_PROPERTIES upload_heap_props = {};
+    upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
+    upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    upload_heap_props.CreationNodeMask = 1;
+    upload_heap_props.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC upload_heap_resource_desc = {};
+    upload_heap_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    upload_heap_resource_desc.Alignment = 0;
+    upload_heap_resource_desc.Width = WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex); // This is the only field that really matters.
+    upload_heap_resource_desc.Height = 1;
+    upload_heap_resource_desc.DepthOrArraySize = 1;
+    upload_heap_resource_desc.MipLevels = 1;
+    upload_heap_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+    upload_heap_resource_desc.SampleDesc.Count = 1;
+    upload_heap_resource_desc.SampleDesc.Quality = 0;
+    upload_heap_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    upload_heap_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    HRESULT upload_buffer_creation_res = d3d_context->device->CreateCommittedResource(
+        &upload_heap_props,
+        D3D12_HEAP_FLAG_NONE,
+        &upload_heap_resource_desc,
+        D3D12_RESOURCE_STATE_GENERIC_READ, // this is from the GPU's perspective
+        NULL,
+        IID_PPV_ARGS(&chunk->upload_buffer)
+    );
+    ASSERT(SUCCEEDED(upload_buffer_creation_res));
+
+    D3D12_HEAP_PROPERTIES heap_props = {};
+    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
+    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heap_props.CreationNodeMask = 1;
+    heap_props.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC buffer_resource_desc = {};
+    buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_resource_desc.Alignment = 0;
+    buffer_resource_desc.Width = WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex);
+    buffer_resource_desc.Height = 1;
+    buffer_resource_desc.DepthOrArraySize = 1;
+    buffer_resource_desc.MipLevels = 1;
+    buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+    buffer_resource_desc.SampleDesc.Count = 1;
+    buffer_resource_desc.SampleDesc.Quality = 0;
+    buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    HRESULT buffer_creation_res = d3d_context->device->CreateCommittedResource(
+        &heap_props,
+        D3D12_HEAP_FLAG_NONE,
+        &buffer_resource_desc,
+        D3D12_RESOURCE_STATE_COMMON,
+        NULL,
+        IID_PPV_ARGS(&chunk->vertex_buffer)
+    );
+    ASSERT(SUCCEEDED(buffer_creation_res));
+
+    chunk->vbo_ready = false;
 }
 
 struct GameState {
     f32 time;
     RandomSeries random_series;
     SimplexTable* simplex_table;
+
+    D3DContext d3d_context;
 
     f32 camera_pitch;
     f32 camera_yaw;
@@ -270,8 +873,9 @@ struct GameState {
 
     Chunk world[WORLD_W * WORLD_H * WORLD_W];
 
-    GPU_Pipeline* chunk_render_pipeline;
-    GPU_Pipeline* wireframe_render_pipeline;
+    D3DPipeline chunk_render_pipeline;
+    D3DPipeline wireframe_render_pipeline;
+    // GPU_Pipeline* text_render_pipeline;
 
     b32 is_wireframe;
 
@@ -283,7 +887,7 @@ struct GameState {
 };
 
 extern "C"
-void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, GameMemory* memory, InputState* input) {
+void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     ASSERT(memory->permanent_storage_size >= sizeof(GameState));
     GameState* game_state = (GameState*)memory->permanent_storage;
 
@@ -306,6 +910,9 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
         u32 w, h;
         u8* bitmap_font = read_image(".\\assets\\monogram-bitmap.png", &w, &h, &game_state->static_arena, &game_state->frame_arena);
         (void) bitmap_font;
+
+        game_state->d3d_context = initializeD3D12(true);
+        createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
 
         for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
 
@@ -335,22 +942,18 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                 }
             }
 
-            // TODO: the GPU API should have a way to specify ranges in the upload buffer, so you can create a big one and reuse it across a copy path
-            game_state->world[chunk_idx].upload_buffer = platform_api->createUploadBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), &game_state->static_arena);
-            game_state->world[chunk_idx].vertex_buffer = platform_api->createGPUBuffer(gpu_context, WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex), GPU_BUFFER_USAGE_VERTEX, &game_state->static_arena);
-            refreshChunk(gpu_context, platform_api, &game_state->world[chunk_idx]);
+            createChunkGPUBuffers(&game_state->d3d_context, &game_state->world[chunk_idx]);
+            refreshChunk(&game_state->d3d_context, &game_state->world[chunk_idx]);
         }
 
-        GPU_Shader* chunk_vertex_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->static_arena);
-        GPU_Shader* chunk_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\debug_chunk.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
-        GPU_RootConstant chunk_render_pipeline_constants[2] = {{0, sizeof(m4)}, {1, sizeof(m4)}};
-        GPU_VertexAttribute chunk_render_pipeline_vertex_attributes[2] = {{0, sizeof(v3)}, {sizeof(v3), sizeof(v3)}};
-        game_state->chunk_render_pipeline = platform_api->createPipeline(gpu_context, chunk_render_pipeline_constants, 2, chunk_render_pipeline_vertex_attributes, 2, chunk_vertex_shader, chunk_fragment_shader, true, false, &game_state->static_arena);
+        /*
+        GPU_Shader* text_vertex_shader = createShader(gpu_context, ".\\shaders\\bitmap_font.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->frame_arena);
+        GPU_Shader* text_fragment_shader = createShader(gpu_context, ".\\shaders\\bitmap_font.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->frame_arena);
+        game_state->text_render_pipeline = createPipeline(gpu_context, NULL, 0, NULL, 0, text_vertex_shader, text_fragment_shader, true, false, &game_state->static_arena);
+        destroyShader(gpu_context, text_vertex_shader);
+        destroyShader(gpu_context, text_fragment_shader);
 
-        GPU_Shader* wireframe_vertex_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\solid_color.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->static_arena);
-        GPU_Shader* wireframe_fragment_shader = platform_api->createShader(gpu_context, (char*)L".\\shaders\\solid_color.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->static_arena);
-        GPU_RootConstant wireframe_render_pipeline_constants[3] = {{0, sizeof(m4)}, {1, sizeof(m4)}, {2, sizeof(v4)}};
-        game_state->wireframe_render_pipeline = platform_api->createPipeline(gpu_context, wireframe_render_pipeline_constants, 3, chunk_render_pipeline_vertex_attributes, 2, wireframe_vertex_shader, wireframe_fragment_shader, false, true, &game_state->static_arena);
+        */
 
         memory->is_initialized = true;
     }
@@ -492,8 +1095,8 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
                     // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
                     // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
                     // i.e. generate the mesh but only upload it after the previous frame is rendered. Perhaps in a separate thread.
-                    platform_api->waitForGPU(gpu_context);
-                    refreshChunk(gpu_context, platform_api, &game_state->world[chunk_to_traverse]);
+                    waitForGPU(&game_state->d3d_context);
+                    refreshChunk(&game_state->d3d_context, &game_state->world[chunk_to_traverse]);
                     break;
                 }
 
@@ -508,34 +1111,136 @@ void gameUpdate(f32 dt, GPU_Context* gpu_context, PlatformAPI* platform_api, Gam
     }
 
     // RENDERING
-    GPU_CommandBuffer* cmd_buf = platform_api->waitForCommandBuffer(gpu_context, &game_state->frame_arena);
-    f32 clear_color[] = {0.1, 0.1, 0.2, 1};
-    platform_api->recordClearCommand(gpu_context, cmd_buf, clear_color);
 
-    m4 camera_matrix = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
-
-    if (game_state->is_wireframe) {
-        platform_api->setPipeline(cmd_buf, game_state->wireframe_render_pipeline);
-        v4 wireframe_color = {1, 1, 1, 1};
-        platform_api->pushConstant(cmd_buf, 2, wireframe_color.data, sizeof(v4));
-    } else {
-        platform_api->setPipeline(cmd_buf, game_state->chunk_render_pipeline);
+    // NOTE: Wait for the render commands sent the last time we used that backbuffer have
+    // been completed, by sleeping until its value gets updated by the signal command we enqueued last time.
+    D3DFrameContext* current_frame = &game_state->d3d_context.frames[game_state->d3d_context.current_frame_idx];
+    if(current_frame->fence->GetCompletedValue() < current_frame->fence_ready_value) {
+        current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
+        WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
     }
 
-    platform_api->pushConstant(cmd_buf, 1, camera_matrix.data, sizeof(m4));
+    // NOTE: Reset the frame's command allocator and list, now that they are no longer in use.
+    HRESULT alloc_reset = current_frame->command_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
+
+    // NOTE: Indicate to the driver that the backbuffer needs to be available as a render target.
+    D3D12_RESOURCE_BARRIER render_barrier = {};
+    render_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    render_barrier.Transition.pResource = current_frame->render_target_resource;
+    render_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    render_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    current_frame->command_list->ResourceBarrier(1, &render_barrier);
+
+    // NOTE: Clear the backbuffer.
+    f32 clear_color[] = {0.1, 0.1, 0.2, 1};
+    current_frame->command_list->ClearRenderTargetView(current_frame->render_target_view_descriptor, clear_color, 0, NULL);
+    current_frame->command_list->ClearDepthStencilView(current_frame->depth_target_view_descriptor, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+
+    // NOTE: Set the render pipeline stuff.
+    RECT clientRect;
+    GetClientRect(game_state->d3d_context.window, &clientRect);
+
+    D3D12_VIEWPORT viewport = {};
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = clientRect.right;
+    viewport.Height = clientRect.bottom;
+    viewport.MinDepth = 0.0;
+    viewport.MaxDepth = 1.0;
+
+    D3D12_RECT scissor = {};
+    scissor.top = viewport.TopLeftY;
+    scissor.bottom = viewport.Height;
+    scissor.left = viewport.TopLeftX;
+    scissor.right = viewport.Width;
+
+    current_frame->command_list->RSSetViewports(1, &viewport);
+    current_frame->command_list->RSSetScissorRects(1, &scissor);
+
+    current_frame->command_list->OMSetRenderTargets(1, &current_frame->render_target_view_descriptor, FALSE, &current_frame->depth_target_view_descriptor);
+    current_frame->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // NOTE: Draw the chunks.
+    if (game_state->is_wireframe) {
+        current_frame->command_list->SetPipelineState(game_state->wireframe_render_pipeline.pipeline_state);
+        current_frame->command_list->SetGraphicsRootSignature(game_state->wireframe_render_pipeline.root_signature);
+
+        v4 wireframe_color = {1, 1, 1, 1};
+        current_frame->command_list->SetGraphicsRoot32BitConstants(2, 4, wireframe_color.data, 0);
+    } else {
+        current_frame->command_list->SetPipelineState(game_state->chunk_render_pipeline.pipeline_state);
+        current_frame->command_list->SetGraphicsRootSignature(game_state->chunk_render_pipeline.root_signature);
+    }
+
+    m4 fused_perspective_view = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
+    current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, fused_perspective_view.data, 0);
 
     for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
         u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
         u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
         u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
 
+        Chunk* chunk = &game_state->world[chunk_idx];
+
         m4 chunk_model = makeTranslation(v3 {(f32)chunk_origin_x, (f32)chunk_origin_y, (f32)chunk_origin_z});
-        platform_api->pushConstant(cmd_buf, 0, chunk_model.data, sizeof(m4));
-        platform_api->setVertexBuffer(cmd_buf, game_state->world[chunk_idx].vertex_buffer);
-        platform_api->drawCall(cmd_buf, game_state->world[chunk_idx].vertices_count);
+        current_frame->command_list->SetGraphicsRoot32BitConstants(0, 16, chunk_model.data, 0);
+
+        // NOTE: If the chunk has just been updated, it needs to be transitioned
+        // back into a vertex buffer, from a copy destination buffer.
+        if (!chunk->vbo_ready) {
+            D3D12_RESOURCE_BARRIER to_vertex_buffer_barrier = {};
+            to_vertex_buffer_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            to_vertex_buffer_barrier.Transition.pResource = chunk->vertex_buffer;
+            to_vertex_buffer_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            to_vertex_buffer_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+            to_vertex_buffer_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            current_frame->command_list->ResourceBarrier(1, &to_vertex_buffer_barrier);
+
+            chunk->vbo_ready = true;
+        }
+
+        D3D12_VERTEX_BUFFER_VIEW vb_view;
+        vb_view.BufferLocation = chunk->vertex_buffer->GetGPUVirtualAddress();
+        vb_view.StrideInBytes = sizeof(ChunkVertex);
+        vb_view.SizeInBytes = chunk->vertices_count * sizeof(ChunkVertex);
+
+        current_frame->command_list->IASetVertexBuffers(0, 1, &vb_view);
+
+        current_frame->command_list->DrawInstanced(chunk->vertices_count, 1, 0, 0);
     }
 
-    platform_api->sendCommandBufferAndPresent(gpu_context, cmd_buf);
+    // NOTE: The backbuffer should be transitionned to be used for presentation.
+    D3D12_RESOURCE_BARRIER present_barrier = {};
+    present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    present_barrier.Transition.pResource = current_frame->render_target_resource;
+    present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    present_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    current_frame->command_list->ResourceBarrier(1, &present_barrier);
+
+    // NOTE: Close the command list and send it to the GPU for execution.
+    HRESULT close_res = current_frame->command_list->Close();
+    ASSERT(SUCCEEDED(close_res));
+    game_state->d3d_context.graphics_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&current_frame->command_list);
+
+    // TODO: Sort the whole vsync situation out.
+    game_state->d3d_context.swapchain->Present(1, 0);
+
+    // NOTE: Signal this frame's fence when the graphics commands enqueued until now have completed.
+    game_state->d3d_context.graphics_command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
+
+    // NOTE: Get the next frame's index
+    // TODO: Confirm that this is updated by the call to Present.
+    game_state->d3d_context.current_frame_idx = game_state->d3d_context.swapchain->GetCurrentBackBufferIndex();
+
+    /*
+    // setPipeline(cmd_buf, game_state->text_render_pipeline);
+    // drawCall(cmd_buf, 6);
+    */
 
     clearArena(&game_state->frame_arena);
 }

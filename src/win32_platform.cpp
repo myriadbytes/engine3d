@@ -1,9 +1,4 @@
-#define NOMINMAX
 #include <Windows.h>
-
-#include <d3d12.h>
-#include <dxgi1_4.h>
-#include <d3dcompiler.h>
 #include <strsafe.h>
 #include <GameInput.h>
 
@@ -23,12 +18,11 @@ using namespace GameInput::v3;
 #include "common.h"
 #include "input.h"
 #include "game_api.h"
-#include "win32_gpu.h"
 
 global b32 global_running = false;
 
-// NOTE: due to the way Microsoft's GameInput works, we need to keep
-// more state around than what we want to present to the user
+// NOTE: Due to the way Microsoft's GameInput works, we need to keep
+// more state around than what we want to present to the game.
 struct WindowsInputState {
     InputState input_state;
     i64 mouse_accumulated_x;
@@ -194,6 +188,18 @@ FILETIME getFileLastWriteTime(const char* filename) {
     return file_data.ftLastWriteTime;
 }
 
+// NOTE: We need to load the D3D12 DLLs in the base
+// executable so their state persists across game DLL
+// unload/reloads.
+void loadPersistentDLLs() {
+    static HMODULE d3d12_dll = LoadLibraryA("d3d12.dll");
+    USED(d3d12_dll);
+    static HMODULE dxgi_dll = LoadLibraryA("dxgi.dll");
+    USED(dxgi_dll);
+    static HMODULE d3dcompiler_dll = LoadLibraryA("d3dcompiler.dll");
+    USED(d3dcompiler_dll);
+}
+
 void loadGameCode(GameCode* game_code, const char* src_dll_name) {
     *game_code = {};
     game_code->write_time = getFileLastWriteTime(src_dll_name);
@@ -240,10 +246,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+    loadPersistentDLLs();
+
     // NOTE: create and register the window class
     WNDCLASSA window_class = {};
     window_class.hInstance = hInstance;
-    window_class.lpszClassName = "Win32 Window Class";
+    window_class.lpszClassName = "Voxel Game Window Class";
     window_class.lpfnWndProc = WindowProc;
     RegisterClassA(&window_class);
 
@@ -266,10 +274,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     global_running = true;
 
-    GPU_Context d3d_context = initD3D12(window, true);
-    //D3D12RenderPipeline solid_color_pipeline = initDebugChunkPipeline(&d3d_context, false, true);
-    //D3D12RenderPipeline wireframe_pipeline = initDebugChunkPipeline(&d3d_context, true, false);
-
     TimingInfo timing_info = initTimingInfo();
     GameMemory game_memory = {};
     game_memory.permanent_storage_size = MEGABYTES(64);
@@ -277,23 +281,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ASSERT(game_memory.permanent_storage != NULL);
 
     GameCode game_code = {};
-
-    PlatformAPI platform_api = {};
-    platform_api.createUploadBuffer = createUploadBuffer;
-    platform_api.createGPUBuffer = createGPUBuffer;
-    platform_api.mapUploadBuffer = mapUploadBuffer;
-    platform_api.unmapUploadBuffer = unmapUploadBuffer;
-    platform_api.blockingUploadToGPUBuffer = blockingUploadToGPUBuffer;
-    platform_api.waitForCommandBuffer = waitForCommandBuffer;
-    platform_api.sendCommandBufferAndPresent = sendCommandBufferAndPresent;
-    platform_api.recordClearCommand = recordClearCommand;
-    platform_api.pushConstant = pushConstant;
-    platform_api.createShader = createShader;
-    platform_api.createPipeline = createPipeline;
-    platform_api.setPipeline = setPipeline;
-    platform_api.setVertexBuffer = setVertexBuffer;
-    platform_api.drawCall = drawCall;
-    platform_api.waitForGPU = waitForGPU;
 
     // NOTE: game input double-buffering
     // i think casey does this to prepare for asynchronous event
@@ -334,8 +321,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         pollGameInput(window, microsoft_game_input_interface, previous_input_state, current_input_state);
 
         if (game_code.is_valid) {
-            // TODO: compute the actual dt
-            game_code.game_update(1.f/60.f, &d3d_context, &platform_api, &game_memory, &current_input_state->input_state);
+            // TODO: Compute the actual dt, smoothed over multiple frames to avoid stuttering.
+            // SEE: https://x.com/FlohOfWoe/status/1810937083533443251
+            game_code.game_update(1.f/60.f, &game_memory, &current_input_state->input_state);
         }
 
         // NOTE: Swap the user input buffers
