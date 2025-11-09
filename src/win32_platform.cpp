@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include <strsafe.h>
 #include <GameInput.h>
+#include <winuser.h>
 
 #ifndef GAMEINPUT_API_VERSION
 #define GAMEINPUT_API_VERSION 0
@@ -281,7 +282,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassA(&window_class);
 
     HWND window = CreateWindowExA(
-        /* behavior */ 0,
+        /* behavior */ WS_EX_TOPMOST,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,

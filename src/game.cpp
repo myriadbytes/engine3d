@@ -564,7 +564,7 @@ void blockingTextureUpload(D3DContext* d3d_context, ID3D12Resource* src_buffer, 
     }
 }
 
-struct TextRenderingState {
+struct TextRenderer {
     D3DPipeline render_pipeline;
     ID3D12Resource* font_texture_buffer;
     ID3D12DescriptorHeap* font_texture_descriptor_heap;
@@ -572,7 +572,7 @@ struct TextRenderingState {
     b32 texture_ready;
 };
 
-void initializeTextRendering(D3DContext* d3d_context, TextRenderingState* to_init, Arena* scratch) {
+void initializeTextRendering(D3DContext* d3d_context, TextRenderer* to_init, Arena* scratch) {
         // NOTE: Create the pipeline.
         ID3DBlob* text_vertex_shader;
         ID3DBlob* text_fragment_shader;
@@ -820,6 +820,23 @@ struct Chunk {
     ID3D12Resource* vertex_buffer;
     b32 vbo_ready;
 };
+
+v3i worldPosToChunk(v3 world_pos) {
+    v3 chunk_pos = world_pos / CHUNK_W;
+    v3i truncated = {
+        (i32)chunk_pos.x,
+        (i32)chunk_pos.y,
+        (i32)chunk_pos.z,
+    };
+
+    v3i floored = {
+        (chunk_pos.x < (f32)truncated.x) ? truncated.x - 1 : truncated.x,
+        (chunk_pos.y < (f32)truncated.y) ? truncated.y - 1 : truncated.y,
+        (chunk_pos.z < (f32)truncated.z) ? truncated.z - 1 : truncated.z,
+    };
+
+    return floored;
+}
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
 // TODO: Currently the chunk doesn't look into neighboring chunks. This means there are generated
@@ -1152,7 +1169,7 @@ void createChunkGPUBuffers(D3DContext* d3d_context, Chunk* chunk) {
 
 // TODO: Switch away from null-terminated strings.
 // NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
-void drawDebugTextOnScreen(TextRenderingState* text_renderer, ID3D12GraphicsCommandList* command_list, const char* text, u32 start_row, u32 start_col) {
+void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandList* command_list, const char* text, u32 start_row, u32 start_col) {
     // NOTE: Setup pipeline and texture binding.
     if (!text_renderer->texture_ready) {
         D3D12_RESOURCE_BARRIER to_shader_res_barrier = {};
@@ -1239,7 +1256,7 @@ struct GameState {
     D3DPipeline chunk_render_pipeline;
     D3DPipeline wireframe_render_pipeline;
 
-    TextRenderingState text_rendering_state;
+    TextRenderer text_renderer;
 
     b32 is_wireframe;
 
@@ -1306,7 +1323,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             refreshChunk(&game_state->d3d_context, &game_state->world[chunk_idx]);
         }
 
-        initializeTextRendering(&game_state->d3d_context, &game_state->text_rendering_state, &game_state->frame_arena);
+        initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
 
         memory->is_initialized = true;
     }
@@ -1577,18 +1594,18 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     }
 
     // NOTE: Text rendering test.
-
     char player_pos_string[256];
+    v3i chunk_position = worldPosToChunk(game_state->player_position);
     StringCbPrintf(player_pos_string, ARRAY_COUNT(player_pos_string),
-                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d (broken for negative coords)",
+                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d",
                    game_state->player_position.x,
                    game_state->player_position.y,
                    game_state->player_position.z,
-                   (int)(game_state->player_position.x / CHUNK_W),
-                   (int)(game_state->player_position.y / CHUNK_W),
-                   (int)(game_state->player_position.z / CHUNK_W)
+                   chunk_position.x,
+                   chunk_position.y,
+                   chunk_position.z
     );
-    drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame->command_list, player_pos_string, 0, 0);
+    drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, player_pos_string, 0, 0);
 
     // NOTE: The backbuffer should be transitionned to be used for presentation.
     D3D12_RESOURCE_BARRIER present_barrier = {};

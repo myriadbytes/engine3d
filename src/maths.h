@@ -45,6 +45,42 @@ struct v4 {
     };
 };
 
+struct v2i {
+    union {
+        struct {
+            i32 x, y;
+        };
+        struct {
+            i32 u, v;
+        };
+        i32 data[2];
+    };
+};
+
+struct v3i {
+    union {
+        struct {
+            i32 x, y, z;
+        };
+        struct {
+            i32 r, g, b;
+        };
+        i32 data[3];
+    };
+};
+
+struct v4i {
+    union {
+        struct {
+            i32 x, y, z, w;
+        };
+        struct {
+            i32 r, g, b, a;
+        };
+        i32 data[4];
+    };
+};
+
 struct m4 {
     f32 data[16];
 
@@ -211,6 +247,30 @@ inline m4 operator*(m4 a, m4 b) {
         }
     }
 
+    return result;
+}
+
+inline v2 operator/ (v2 a, f32 scalar) {
+    v2 result;
+    result.x = a.x * scalar;
+    result.y = a.y * scalar;
+    return result;
+}
+
+inline v3 operator/ (v3 a, f32 scalar) {
+    v3 result;
+    result.x = a.x / scalar;
+    result.y = a.y / scalar;
+    result.z = a.z / scalar;
+    return result;
+}
+
+inline v4 operator/ (v4 a, f32 scalar) {
+    v4 result;
+    result.x = a.x / scalar;
+    result.y = a.y / scalar;
+    result.z = a.z / scalar;
+    result.w = a.w / scalar;
     return result;
 }
 
