@@ -95,7 +95,10 @@ void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previ
         for (u32 i = 0; i < key_states_count; i++) {
             GameInputKeyState key = key_states[i];
 
-            ASSERT(key.scanCode < SCANCODE_COUNT);
+            // TODO: Log here. I know that the windows key (on my keyboard ?)
+            // produces a weird scancode.
+            if(key.scanCode >= SCANCODE_COUNT) continue;
+
             current_input_state->input_state.kb.keys[key.scanCode].is_down = true;
             current_input_state->input_state.kb.keys[key.scanCode].transitions = (current_input_state->input_state.kb.keys[key.scanCode].is_down != previous_input_state->input_state.kb.keys[key.scanCode].is_down);
         }

@@ -1150,6 +1150,77 @@ void createChunkGPUBuffers(D3DContext* d3d_context, Chunk* chunk) {
     chunk->vbo_ready = false;
 }
 
+// TODO: Switch away from null-terminated strings.
+// NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
+void drawDebugTextOnScreen(TextRenderingState* text_renderer, ID3D12GraphicsCommandList* command_list, const char* text, u32 start_row, u32 start_col) {
+    // NOTE: Setup pipeline and texture binding.
+    if (!text_renderer->texture_ready) {
+        D3D12_RESOURCE_BARRIER to_shader_res_barrier = {};
+        to_shader_res_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_shader_res_barrier.Transition.pResource = text_renderer->font_texture_buffer;
+        to_shader_res_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        to_shader_res_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        to_shader_res_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        command_list->ResourceBarrier(1, &to_shader_res_barrier);
+
+        text_renderer->texture_ready = true;
+    }
+    command_list->SetPipelineState(text_renderer->render_pipeline.pipeline_state);
+    command_list->SetGraphicsRootSignature(text_renderer->render_pipeline.root_signature);
+    command_list->SetDescriptorHeaps(1, &text_renderer->font_texture_descriptor_heap);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_texture_handle = text_renderer->font_texture_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+    command_list->SetGraphicsRootDescriptorTable(0, gpu_texture_handle);
+            
+    // NOTE: https://datagoblin.itch.io/monogram
+    // The bitmap font is 96x96 and has 16x8 chars, so the individual
+    // characters are 6x12.
+    // The vertical layout is :
+    // - 2px ascender on some chars
+    // - 5px for all chars
+    // - 2px descender on some chars
+    // - 3px padding on the bottom
+    // And the horizontal layout is : 
+    // - 1px padding on the left
+    // - 5px for all chars
+    // So when laying out chars on a grid, there is already a horizontal
+    // space between them because of the 1px left padding, and a big line
+    // space of 3 pixels. Most chars are also vertically centered, due to the
+    // ascender/descender pair.
+    constexpr f32 char_ratio = 6.f / 12.f;
+    constexpr f32 char_scale = 0.04f; // TODO: Make this configurable ?
+    constexpr f32 char_width = (char_ratio * char_scale) * 2;
+    constexpr f32 char_height = (char_scale) * 2;
+        
+    // NOTE: The shader produce a quad that covers the whole screen.
+    // We need to make it a quad of the right proportions and
+    // located in the first slot.
+    m4 quad_setup_matrix =
+        makeTranslation((f32)start_col * char_width, (f32)start_row * -char_height, 0)
+        * makeTranslation(-(1 - char_width), 1 - char_height / 2, 0)
+        * makeScale(char_width/2, char_height/2, 0);
+
+    i32 row = start_row;
+    i32 col = start_col;
+    for (int char_i = 0; text[char_i] != 0; char_i++) {
+        u32 char_ascii_codepoint = (u32)text[char_i];
+        if (char_ascii_codepoint == '\n') {
+            row = start_row;
+            col++;
+            continue;
+        }
+
+        m4 char_translate = makeTranslation((f32)row * char_width, (f32)col * -char_height , 0);
+        m4 char_matrix = char_translate * quad_setup_matrix;
+
+        // TODO: Implement text wrapping here.
+        row++;
+
+        command_list->SetGraphicsRoot32BitConstants(1, 16, char_matrix.data, 0);
+        command_list->SetGraphicsRoot32BitConstants(2, 1, &char_ascii_codepoint, 0);
+        command_list->DrawInstanced(6, 1, 0, 0);
+    }
+}
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -1506,59 +1577,18 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     }
 
     // NOTE: Text rendering test.
-    if (!game_state->text_rendering_state.texture_ready) {
-        D3D12_RESOURCE_BARRIER to_shader_res_barrier = {};
-        to_shader_res_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        to_shader_res_barrier.Transition.pResource = game_state->text_rendering_state.font_texture_buffer;
-        to_shader_res_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-        to_shader_res_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        to_shader_res_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        current_frame->command_list->ResourceBarrier(1, &to_shader_res_barrier);
 
-        game_state->text_rendering_state.texture_ready = true;
-    }
-    current_frame->command_list->SetPipelineState(game_state->text_rendering_state.render_pipeline.pipeline_state);
-    current_frame->command_list->SetGraphicsRootSignature(game_state->text_rendering_state.render_pipeline.root_signature);
-    current_frame->command_list->SetDescriptorHeaps(1, &game_state->text_rendering_state.font_texture_descriptor_heap);
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu_texture_handle = game_state->text_rendering_state.font_texture_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
-    current_frame->command_list->SetGraphicsRootDescriptorTable(0, gpu_texture_handle);
-
-    // NOTE: monogram.png is 96x96 and has 16x8 chars, so the individual
-    // characters are 6x12.
-    // The vertical layout is :
-    // - 2px ascender on some chars
-    // - 5px for all chars
-    // - 2px descender on some chars
-    // - 3px padding on the bottom
-    // And the horizontal layout is : 
-    // - 1px padding on the left
-    // - 5px for all chars
-    // So when laying out chars on a grid, there is already a horizontal
-    // space between them because of the 1px left padding, and a big line
-    // space of 3 pixels. Most chars are also vertically centered, due to the
-    // ascender/descender pair.
-    f32 char_ratio = 6.f / 12.f;
-    f32 char_scale = 0.04f;
-    f32 char_width = char_ratio * char_scale;
-    f32 char_height = char_scale;
-
-    char test_string_buffer[128];
-    StringCbPrintf(test_string_buffer, ARRAY_COUNT(test_string_buffer),
-                   "> Pos: %.2f, %.2f, %.2f",
+    char player_pos_string[256];
+    StringCbPrintf(player_pos_string, ARRAY_COUNT(player_pos_string),
+                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d (broken for negative coords)",
                    game_state->player_position.x,
                    game_state->player_position.y,
-                   game_state->player_position.z
+                   game_state->player_position.z,
+                   (int)(game_state->player_position.x / CHUNK_W),
+                   (int)(game_state->player_position.y / CHUNK_W),
+                   (int)(game_state->player_position.z / CHUNK_W)
     );
-    for (int char_i = 0; test_string_buffer[char_i] != 0; char_i++) {
-        // TODO: We just love hardcoded values !
-        m4 char_translate = makeTranslation(char_width * char_i * 2 - 0.97, 0.95, 0);
-        m4 char_scale = makeScale(char_width, char_height, 0);
-        m4 char_matrix = char_translate * char_scale;
-        u32 char_ascii_codepoint = (u32)test_string_buffer[char_i];
-        current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, char_matrix.data, 0);
-        current_frame->command_list->SetGraphicsRoot32BitConstants(2, 1, &char_ascii_codepoint, 0);
-        current_frame->command_list->DrawInstanced(6, 1, 0, 0);
-    }
+    drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame->command_list, player_pos_string, 0, 0);
 
     // NOTE: The backbuffer should be transitionned to be used for presentation.
     D3D12_RESOURCE_BARRIER present_barrier = {};
