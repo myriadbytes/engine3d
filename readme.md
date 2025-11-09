@@ -42,6 +42,7 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 ### Engine:
 - [x] Game code hot-reloading
 - [x] Basic PNG decoder
+- [x] Debug text rendering using a bitmap font
 - [x] Keyboard & controller input processing (using the Windows 10+ GameInput lib)
 - [x] Generating `compile_commands.json` inside the build script
 - [ ] Shaders hot-reloading
@@ -52,7 +53,6 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 - [ ] "Topmost" window mode (useful to keep the window on top of the editor while hot-reloading)
 - [x] Basic matrix math library
 - [ ] Logging
-- [ ] UI & (bitmap) text rendering
 - [ ] Thread pool ?? For async asset streaming
 
 ### Game:

@@ -1,3 +1,4 @@
+#include "maths.h"
 #include <Windows.h>
 #include <strsafe.h>
 #include <GameInput.h>
@@ -157,15 +158,36 @@ void pollGameInput(HWND window, IGameInput* game_input, WindowsInputState* previ
         current_input_state->input_state.ctrl.y.is_down = (pad_state.buttons & GameInputGamepadY) == GameInputGamepadY;
         current_input_state->input_state.ctrl.y.transitions = (current_input_state->input_state.ctrl.y.is_down != previous_input_state->input_state.ctrl.y.is_down);
 
-        current_input_state->input_state.ctrl.lb.is_down = (pad_state.buttons & GameInputGamepadRightShoulder) == GameInputGamepadRightShoulder;
-        current_input_state->input_state.ctrl.lb.transitions = (current_input_state->input_state.ctrl.lb.is_down != previous_input_state->input_state.ctrl.lb.is_down);
-
-        current_input_state->input_state.ctrl.rb.is_down = (pad_state.buttons & GameInputGamepadLeftShoulder) == GameInputGamepadLeftShoulder;
+        current_input_state->input_state.ctrl.rb.is_down = (pad_state.buttons & GameInputGamepadRightShoulder) == GameInputGamepadRightShoulder;
         current_input_state->input_state.ctrl.rb.transitions = (current_input_state->input_state.ctrl.rb.is_down != previous_input_state->input_state.ctrl.rb.is_down);
 
-        // TODO: deadzone handling
-        current_input_state->input_state.ctrl.left_stick = v2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
-        current_input_state->input_state.ctrl.right_stick = v2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+        current_input_state->input_state.ctrl.lb.is_down = (pad_state.buttons & GameInputGamepadLeftShoulder) == GameInputGamepadLeftShoulder;
+        current_input_state->input_state.ctrl.lb.transitions = (current_input_state->input_state.ctrl.lb.is_down != previous_input_state->input_state.ctrl.lb.is_down);
+
+        current_input_state->input_state.ctrl.lstick_button.is_down = (pad_state.buttons & GameInputGamepadLeftThumbstick) == GameInputGamepadLeftThumbstick;
+        current_input_state->input_state.ctrl.lstick_button.transitions = (current_input_state->input_state.ctrl.lstick_button.is_down != previous_input_state->input_state.ctrl.lstick_button.is_down);
+
+        current_input_state->input_state.ctrl.rstick_button.is_down = (pad_state.buttons & GameInputGamepadRightThumbstick) == GameInputGamepadRightThumbstick;
+        current_input_state->input_state.ctrl.rstick_button.transitions = (current_input_state->input_state.ctrl.rstick_button.is_down != previous_input_state->input_state.ctrl.rstick_button.is_down);
+
+        // NOTE: https://www.gamedeveloper.com/business/doing-thumbstick-dead-zones-right
+        constexpr f32 deadzone = 0.25f;
+        v2 raw_stick_left = v2 {pad_state.leftThumbstickX, pad_state.leftThumbstickY};
+        v2 raw_stick_right = v2 {pad_state.rightThumbstickX, pad_state.rightThumbstickY};
+
+        if (length(raw_stick_left) < deadzone) {
+            current_input_state->input_state.ctrl.left_stick = v2 {0, 0};
+        } else {
+            current_input_state->input_state.ctrl.left_stick = normalize(raw_stick_left)
+            * ((length(raw_stick_left) - deadzone) / (1 - deadzone));
+        }
+
+        if (length(raw_stick_right) < deadzone) {
+            current_input_state->input_state.ctrl.right_stick = v2 {0, 0};
+        } else {
+            current_input_state->input_state.ctrl.right_stick = normalize(raw_stick_right)
+            * ((length(raw_stick_right) - deadzone) / (1 - deadzone));
+        }
 
         pad_reading->Release();
     }

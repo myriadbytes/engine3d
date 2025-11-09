@@ -67,7 +67,7 @@ struct KeyboardState {
 
 struct ControllerState {
     union {
-        ButtonState buttons[6];
+        ButtonState buttons[8];
         struct {
             ButtonState a;
             ButtonState b;
@@ -75,6 +75,8 @@ struct ControllerState {
             ButtonState y;
             ButtonState rb;
             ButtonState lb;
+            ButtonState lstick_button;
+            ButtonState rstick_button;
         };
     };
     v2 left_stick;

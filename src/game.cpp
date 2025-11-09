@@ -3,9 +3,11 @@
 #include <debugapi.h>
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
+#include <strsafe.h>
 
 #include "common.h"
 #include "game_api.h"
+#include "maths.h"
 #include "noise.h"
 #include "img.h"
 
@@ -291,12 +293,12 @@ void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipe
         // - Model matrix
         // - Fused perspective * view matrix
         D3D12_ROOT_PARAMETER chunk_root_parameters[2];
-        chunk_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        chunk_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         chunk_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         chunk_root_parameters[0].Constants.Num32BitValues = 16;
         chunk_root_parameters[0].Constants.ShaderRegister = 0;
         chunk_root_parameters[0].Constants.RegisterSpace = 0;
-        chunk_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        chunk_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         chunk_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         chunk_root_parameters[1].Constants.Num32BitValues = 16;
         chunk_root_parameters[1].Constants.ShaderRegister = 1;
@@ -325,17 +327,17 @@ void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipe
         // - Fused perspective * view matrix
         // - Wireframe color
         D3D12_ROOT_PARAMETER wireframe_root_parameters[3];
-        wireframe_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         wireframe_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         wireframe_root_parameters[0].Constants.Num32BitValues = 16;
         wireframe_root_parameters[0].Constants.ShaderRegister = 0;
         wireframe_root_parameters[0].Constants.RegisterSpace = 0;
-        wireframe_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         wireframe_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         wireframe_root_parameters[1].Constants.Num32BitValues = 16;
         wireframe_root_parameters[1].Constants.ShaderRegister = 1;
         wireframe_root_parameters[1].Constants.RegisterSpace = 0;
-        wireframe_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; 
+        wireframe_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         wireframe_root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
         wireframe_root_parameters[2].Constants.Num32BitValues = 4;
         wireframe_root_parameters[2].Constants.ShaderRegister = 2;
@@ -463,6 +465,14 @@ void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipe
         ASSERT(SUCCEEDED(chunk_pipeline_res));
         HRESULT wireframe_pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&wireframe_pipeline_desc, IID_PPV_ARGS(&wireframe_pipeline->pipeline_state));
         ASSERT(SUCCEEDED(wireframe_pipeline_res));
+
+        chunk_vertex_shader->Release();
+        chunk_fragment_shader->Release();
+        wireframe_vertex_shader->Release();
+        wireframe_fragment_shader->Release();
+
+        chunk_serialized_signature->Release();
+        wireframe_serialized_signature->Release();
 }
 
 void blockingUploadToGPUBuffer(D3DContext* d3d_context, ID3D12Resource* src_buffer, ID3D12Resource* dst_buffer, usize size) {
@@ -504,6 +514,289 @@ void blockingUploadToGPUBuffer(D3DContext* d3d_context, ID3D12Resource* src_buff
         d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
         WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
     }
+}
+
+// FIXME: This only works if the texture is already in the copy_dst state. I need to handle GPU uploads better.
+void blockingTextureUpload(D3DContext* d3d_context, ID3D12Resource* src_buffer, ID3D12Resource* dst_texture, u32 width, u32 height) {
+    // NOTE: Wait for the previous upload to have completed.
+    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
+        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
+        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    }
+
+    // NOTE: Prepare the command buffer for recording.
+    HRESULT alloc_reset = d3d_context->copy_allocator->Reset();
+    ASSERT(SUCCEEDED(alloc_reset));
+    HRESULT cmd_reset = d3d_context->copy_command_list->Reset(d3d_context->copy_allocator, NULL);
+    ASSERT(SUCCEEDED(cmd_reset));
+
+    // NOTE: Source and dest texture info.
+    D3D12_TEXTURE_COPY_LOCATION dst_location = {};
+    dst_location.pResource = dst_texture;
+    dst_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst_location.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION src_location = {};
+    src_location.pResource = src_buffer;
+    src_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src_location.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    src_location.PlacedFootprint.Footprint.Width = width;
+    src_location.PlacedFootprint.Footprint.Height = height;
+    src_location.PlacedFootprint.Footprint.Depth = 1;
+    src_location.PlacedFootprint.Footprint.RowPitch = width * 4;
+
+    // NOTE: This is the actual copy command.
+    d3d_context->copy_command_list->CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, NULL);
+
+    // NOTE: Close the command buffer and send it to the GPU for execution.
+    HRESULT close_res = d3d_context->copy_command_list->Close();
+    ASSERT(SUCCEEDED(close_res));
+    d3d_context->copy_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&d3d_context->copy_command_list);
+
+    // NOTE: Signal the copy fence once all commands on the copy queues have been executed.
+    d3d_context->copy_command_queue->Signal(d3d_context->copy_fence, ++d3d_context->copy_fence_ready_value);
+
+    // NOTE: Wait for the upload to have completed. This makes waiting at the beginning of the function technically
+    // redundant, but eh.
+    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
+        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
+        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    }
+}
+
+struct TextRenderingState {
+    D3DPipeline render_pipeline;
+    ID3D12Resource* font_texture_buffer;
+    ID3D12DescriptorHeap* font_texture_descriptor_heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE font_texture_descriptor;
+    b32 texture_ready;
+};
+
+void initializeTextRendering(D3DContext* d3d_context, TextRenderingState* to_init, Arena* scratch) {
+        // NOTE: Create the pipeline.
+        ID3DBlob* text_vertex_shader;
+        ID3DBlob* text_fragment_shader;
+        readAndCompileShaders("./shaders/bitmap_text.hlsl", &text_vertex_shader, &text_fragment_shader);
+
+        // NOTE: Root signature with 1 descriptor table containing the
+        // bitmap font descriptor, a transform matrix and the ascii code. 
+        D3D12_DESCRIPTOR_RANGE range;
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        range.NumDescriptors = 1;
+        range.BaseShaderRegister = 0;
+        range.RegisterSpace = 0;
+        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+        D3D12_ROOT_PARAMETER text_pipeline_root_parameters[3];
+        text_pipeline_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        text_pipeline_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        text_pipeline_root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
+        text_pipeline_root_parameters[0].DescriptorTable.pDescriptorRanges = &range;
+
+        text_pipeline_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        text_pipeline_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        text_pipeline_root_parameters[1].Constants.Num32BitValues = 16;
+        text_pipeline_root_parameters[1].Constants.ShaderRegister = 0;
+        text_pipeline_root_parameters[1].Constants.RegisterSpace = 0;
+
+        text_pipeline_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        text_pipeline_root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+        text_pipeline_root_parameters[2].Constants.Num32BitValues = 1;
+        text_pipeline_root_parameters[2].Constants.ShaderRegister = 1;
+        text_pipeline_root_parameters[2].Constants.RegisterSpace = 0;
+
+        D3D12_STATIC_SAMPLER_DESC sampler_desc = {};
+        sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        sampler_desc.MipLODBias = 0;
+        sampler_desc.MaxAnisotropy = 1;
+        sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        sampler_desc.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+        sampler_desc.MinLOD = 0;
+        sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+        sampler_desc.ShaderRegister = 0;
+        sampler_desc.RegisterSpace = 0;
+        sampler_desc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
+        root_signature_desc.NumParameters = ARRAY_COUNT(text_pipeline_root_parameters);
+        root_signature_desc.pParameters = text_pipeline_root_parameters;
+        root_signature_desc.NumStaticSamplers = 1;
+        root_signature_desc.pStaticSamplers = &sampler_desc;
+        root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        ID3DBlob* serialized_signature;
+        ID3DBlob* serialize_err;
+        HRESULT serialize_res = D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized_signature, &serialize_err);
+        if (serialize_err) {
+            OutputDebugStringA((char*)serialize_err->GetBufferPointer());
+        }
+        ASSERT(SUCCEEDED(serialize_res));
+        ASSERT(serialize_err == NULL);
+        HRESULT signature_res = d3d_context->device->CreateRootSignature(0, serialized_signature->GetBufferPointer(), serialized_signature->GetBufferSize(), IID_PPV_ARGS(&to_init->render_pipeline.root_signature));
+        ASSERT(SUCCEEDED(signature_res));
+
+        D3D12_RASTERIZER_DESC rasterizer_desc = {};
+        rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
+        rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
+        rasterizer_desc.FrontCounterClockwise = true;
+        rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        rasterizer_desc.DepthClipEnable = TRUE;
+        rasterizer_desc.MultisampleEnable = FALSE;
+        rasterizer_desc.AntialiasedLineEnable = FALSE;
+        rasterizer_desc.ForcedSampleCount = 0;
+        rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+        D3D12_BLEND_DESC blend_desc = {};
+        blend_desc.AlphaToCoverageEnable = FALSE;
+        blend_desc.IndependentBlendEnable = FALSE;
+        blend_desc.RenderTarget[0].BlendEnable = TRUE;
+        blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
+        blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        D3D12_DEPTH_STENCIL_DESC depth_desc = {};
+        depth_desc.DepthEnable = FALSE;
+        depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        depth_desc.StencilEnable = FALSE;
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
+        pipeline_desc.InputLayout.pInputElementDescs = NULL;
+        pipeline_desc.InputLayout.NumElements = 0;
+        pipeline_desc.pRootSignature = to_init->render_pipeline.root_signature;
+        pipeline_desc.VS.pShaderBytecode = text_vertex_shader->GetBufferPointer();
+        pipeline_desc.VS.BytecodeLength = text_vertex_shader->GetBufferSize();
+        pipeline_desc.PS.pShaderBytecode = text_fragment_shader->GetBufferPointer();
+        pipeline_desc.PS.BytecodeLength = text_fragment_shader->GetBufferSize();
+        pipeline_desc.RasterizerState = rasterizer_desc;
+        pipeline_desc.BlendState = blend_desc;
+        pipeline_desc.DepthStencilState = depth_desc;
+        pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        pipeline_desc.SampleMask = UINT_MAX;
+        pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pipeline_desc.NumRenderTargets = 1;
+        pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        pipeline_desc.SampleDesc.Count = 1;
+
+        HRESULT pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&to_init->render_pipeline.pipeline_state));
+        ASSERT(SUCCEEDED(pipeline_res));
+
+        text_vertex_shader->Release();
+        text_fragment_shader->Release();
+        serialized_signature->Release();
+
+        // NOTE: Upload the texture and create the related objects.
+        // - Texture buffer
+        // - Upload buffer (released at the end of the function)
+        // - Descriptor heap
+        // - Texture descriptor inside
+        u32 bitmap_width, bitmap_height;
+        u8* bitmap_font = read_image(".\\assets\\monogram-bitmap.png", &bitmap_width, &bitmap_height, scratch, scratch);
+
+        D3D12_HEAP_PROPERTIES heap_props = {};
+        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
+        heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        heap_props.CreationNodeMask = 1;
+        heap_props.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC texture_buffer_resource_desc = {};
+        texture_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture_buffer_resource_desc.Alignment = 0;
+        texture_buffer_resource_desc.Width = bitmap_width;
+        texture_buffer_resource_desc.Height = bitmap_height;
+        texture_buffer_resource_desc.DepthOrArraySize = 1;
+        texture_buffer_resource_desc.MipLevels = 1;
+        texture_buffer_resource_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texture_buffer_resource_desc.SampleDesc.Count = 1;
+        texture_buffer_resource_desc.SampleDesc.Quality = 0;
+        texture_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        texture_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        HRESULT texture_buffer_creation_res = d3d_context->device->CreateCommittedResource(
+            &heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &texture_buffer_resource_desc,
+            D3D12_RESOURCE_STATE_COMMON,
+            NULL,
+            IID_PPV_ARGS(&to_init->font_texture_buffer)
+        );
+        ASSERT(SUCCEEDED(texture_buffer_creation_res));
+
+        D3D12_HEAP_PROPERTIES upload_heap_props = {};
+        upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
+        upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+        upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+        upload_heap_props.CreationNodeMask = 1;
+        upload_heap_props.VisibleNodeMask = 1;
+
+        D3D12_RESOURCE_DESC upload_heap_resource_desc = {};
+        upload_heap_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        upload_heap_resource_desc.Alignment = 0;
+        upload_heap_resource_desc.Width = bitmap_width * bitmap_height * 4; // This is the only field that really matters.
+        upload_heap_resource_desc.Height = 1;
+        upload_heap_resource_desc.DepthOrArraySize = 1;
+        upload_heap_resource_desc.MipLevels = 1;
+        upload_heap_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
+        upload_heap_resource_desc.SampleDesc.Count = 1;
+        upload_heap_resource_desc.SampleDesc.Quality = 0;
+        upload_heap_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        upload_heap_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        ID3D12Resource* upload_buffer;
+        HRESULT upload_buffer_creation_res = d3d_context->device->CreateCommittedResource(
+            &upload_heap_props,
+            D3D12_HEAP_FLAG_NONE,
+            &upload_heap_resource_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, // this is from the GPU's perspective
+            NULL,
+            IID_PPV_ARGS(&upload_buffer)
+        );
+        ASSERT(SUCCEEDED(upload_buffer_creation_res));
+
+        D3D12_RANGE read_range = {};
+        u8* mapped_upload_buffer;
+        upload_buffer->Map(0, &read_range, (void**)&mapped_upload_buffer);
+
+        for (int i = 0; i < bitmap_width * bitmap_height * 4; i++) {
+            mapped_upload_buffer[i] = bitmap_font[i];
+        }
+
+        upload_buffer->Unmap(0, NULL);
+
+        blockingTextureUpload(d3d_context, upload_buffer, to_init->font_texture_buffer, bitmap_width, bitmap_height);
+        to_init->texture_ready = false;
+        upload_buffer->Release();
+
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+        heapDesc.NumDescriptors = 1;
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE; // Important!
+    
+        HRESULT descriptor_heap_res = d3d_context->device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&to_init->font_texture_descriptor_heap));
+        ASSERT(SUCCEEDED(descriptor_heap_res));
+        // u32 srv_descriptor_size = d3d_context->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Format = texture_buffer_resource_desc.Format;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+    
+        D3D12_CPU_DESCRIPTOR_HANDLE srv_handle = to_init->font_texture_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+    
+        d3d_context->device->CreateShaderResourceView(to_init->font_texture_buffer, &srvDesc, srv_handle);
 }
 
 constexpr usize CHUNK_W = 16;
@@ -749,7 +1042,6 @@ b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_dire
     return false;
 }
 
-
 void refreshChunk(D3DContext* d3d_context, Chunk* chunk) {
 
     // NOTE: generate directly in the mapped upload buffer
@@ -793,7 +1085,7 @@ void waitForGPU(D3DContext* d3d_context) {
 // TODO: I'm 99% sure that it is not necessary at all to have one upload buffer per
 // chunk. There should just be a pool of n upload buffers that all chunk share.
 void createChunkGPUBuffers(D3DContext* d3d_context, Chunk* chunk) {
-    
+
     // NOTE: Creates a CPU-side heap + buffer that can be used to transfer data to the GPU
     D3D12_HEAP_PROPERTIES upload_heap_props = {};
     upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
@@ -875,7 +1167,8 @@ struct GameState {
 
     D3DPipeline chunk_render_pipeline;
     D3DPipeline wireframe_render_pipeline;
-    // GPU_Pipeline* text_render_pipeline;
+
+    TextRenderingState text_rendering_state;
 
     b32 is_wireframe;
 
@@ -906,10 +1199,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->camera_yaw = 1 * PI32 / 3;
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
-
-        u32 w, h;
-        u8* bitmap_font = read_image(".\\assets\\monogram-bitmap.png", &w, &h, &game_state->static_arena, &game_state->frame_arena);
-        (void) bitmap_font;
 
         game_state->d3d_context = initializeD3D12(true);
         createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
@@ -946,14 +1235,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             refreshChunk(&game_state->d3d_context, &game_state->world[chunk_idx]);
         }
 
-        /*
-        GPU_Shader* text_vertex_shader = createShader(gpu_context, ".\\shaders\\bitmap_font.hlsl", GPU_SHADER_TYPE_VERTEX, &game_state->frame_arena);
-        GPU_Shader* text_fragment_shader = createShader(gpu_context, ".\\shaders\\bitmap_font.hlsl", GPU_SHADER_TYPE_FRAGMENT, &game_state->frame_arena);
-        game_state->text_render_pipeline = createPipeline(gpu_context, NULL, 0, NULL, 0, text_vertex_shader, text_fragment_shader, true, false, &game_state->static_arena);
-        destroyShader(gpu_context, text_vertex_shader);
-        destroyShader(gpu_context, text_fragment_shader);
-
-        */
+        initializeTextRendering(&game_state->d3d_context, &game_state->text_rendering_state, &game_state->frame_arena);
 
         memory->is_initialized = true;
     }
@@ -962,9 +1244,14 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     game_state->time += dt;
 
     if (!game_state->orbit_mode) {
-        f32 sensitivity = 0.01;
-        game_state->camera_pitch += input->kb.mouse_delta.y * sensitivity;
-        game_state->camera_yaw += input->kb.mouse_delta.x * sensitivity;
+        f32 mouse_sensitivity = 0.01;
+        f32 stick_sensitivity = 0.05;
+
+        game_state->camera_pitch += input->kb.mouse_delta.y * mouse_sensitivity;
+        game_state->camera_yaw += input->kb.mouse_delta.x * mouse_sensitivity;
+
+        game_state->camera_pitch += input->ctrl.right_stick.y * stick_sensitivity;
+        game_state->camera_yaw += input->ctrl.right_stick.x * stick_sensitivity;
 
         f32 safe_pitch = PI32 / 2.f - 0.05f;
         game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
@@ -976,17 +1263,19 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
 
         f32 speed = 20 * dt;
-        if (input->kb.keys[SCANCODE_LSHIFT].is_down) {
+        if (input->kb.keys[SCANCODE_LSHIFT].is_down || input->ctrl.x.is_down) {
             speed *= 5;
         }
 
         // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
         // Let's just say it's a Quake reference.
+        // Also you can move twice as fast by using a keyboard and a controller at the same time.
+        // That's for speedrunners.
 
-        if(input->kb.keys[SCANCODE_Q].is_down) {
+        if(input->kb.keys[SCANCODE_Q].is_down || input->ctrl.lb.is_down) {
             game_state->player_position.y -= speed;
         }
-        if(input->kb.keys[SCANCODE_E].is_down) {
+        if(input->kb.keys[SCANCODE_E].is_down || input->ctrl.rb.is_down) {
             game_state->player_position.y += speed;
         }
         if(input->kb.keys[SCANCODE_A].is_down) {
@@ -1001,6 +1290,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         if(input->kb.keys[SCANCODE_W].is_down) {
             game_state->player_position += game_state->camera_forward * speed;
         }
+
+        game_state->player_position += input->ctrl.left_stick.x * camera_right * speed;
+        game_state->player_position += input->ctrl.left_stick.y * game_state->camera_forward * speed;
     } else {
         f32 orbit_speed = 1.f;
         f32 orbit_distance = 80.f;
@@ -1022,7 +1314,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
     // There has to be a better way, maybe recursive ? But that has drawbacks too.
-    if (input->kb.keys[SCANCODE_SPACE].is_down) {
+    if (input->kb.keys[SCANCODE_SPACE].is_down || input->ctrl.a.is_down) {
 
         usize chunk_to_traverse = 0;
         bool found_chunk = false;
@@ -1140,7 +1432,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     current_frame->command_list->ClearRenderTargetView(current_frame->render_target_view_descriptor, clear_color, 0, NULL);
     current_frame->command_list->ClearDepthStencilView(current_frame->depth_target_view_descriptor, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
 
-    // NOTE: Set the render pipeline stuff.
+    // NOTE: Set the shared graphics pipeline stuff.
     RECT clientRect;
     GetClientRect(game_state->d3d_context.window, &clientRect);
 
@@ -1213,6 +1505,61 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         current_frame->command_list->DrawInstanced(chunk->vertices_count, 1, 0, 0);
     }
 
+    // NOTE: Text rendering test.
+    if (!game_state->text_rendering_state.texture_ready) {
+        D3D12_RESOURCE_BARRIER to_shader_res_barrier = {};
+        to_shader_res_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        to_shader_res_barrier.Transition.pResource = game_state->text_rendering_state.font_texture_buffer;
+        to_shader_res_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        to_shader_res_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        to_shader_res_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        current_frame->command_list->ResourceBarrier(1, &to_shader_res_barrier);
+
+        game_state->text_rendering_state.texture_ready = true;
+    }
+    current_frame->command_list->SetPipelineState(game_state->text_rendering_state.render_pipeline.pipeline_state);
+    current_frame->command_list->SetGraphicsRootSignature(game_state->text_rendering_state.render_pipeline.root_signature);
+    current_frame->command_list->SetDescriptorHeaps(1, &game_state->text_rendering_state.font_texture_descriptor_heap);
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_texture_handle = game_state->text_rendering_state.font_texture_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+    current_frame->command_list->SetGraphicsRootDescriptorTable(0, gpu_texture_handle);
+
+    // NOTE: monogram.png is 96x96 and has 16x8 chars, so the individual
+    // characters are 6x12.
+    // The vertical layout is :
+    // - 2px ascender on some chars
+    // - 5px for all chars
+    // - 2px descender on some chars
+    // - 3px padding on the bottom
+    // And the horizontal layout is : 
+    // - 1px padding on the left
+    // - 5px for all chars
+    // So when laying out chars on a grid, there is already a horizontal
+    // space between them because of the 1px left padding, and a big line
+    // space of 3 pixels. Most chars are also vertically centered, due to the
+    // ascender/descender pair.
+    f32 char_ratio = 6.f / 12.f;
+    f32 char_scale = 0.04f;
+    f32 char_width = char_ratio * char_scale;
+    f32 char_height = char_scale;
+
+    char test_string_buffer[128];
+    StringCbPrintf(test_string_buffer, ARRAY_COUNT(test_string_buffer),
+                   "> Pos: %.2f, %.2f, %.2f",
+                   game_state->player_position.x,
+                   game_state->player_position.y,
+                   game_state->player_position.z
+    );
+    for (int char_i = 0; test_string_buffer[char_i] != 0; char_i++) {
+        // TODO: We just love hardcoded values !
+        m4 char_translate = makeTranslation(char_width * char_i * 2 - 0.97, 0.95, 0);
+        m4 char_scale = makeScale(char_width, char_height, 0);
+        m4 char_matrix = char_translate * char_scale;
+        u32 char_ascii_codepoint = (u32)test_string_buffer[char_i];
+        current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, char_matrix.data, 0);
+        current_frame->command_list->SetGraphicsRoot32BitConstants(2, 1, &char_ascii_codepoint, 0);
+        current_frame->command_list->DrawInstanced(6, 1, 0, 0);
+    }
+
     // NOTE: The backbuffer should be transitionned to be used for presentation.
     D3D12_RESOURCE_BARRIER present_barrier = {};
     present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1236,11 +1583,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     // NOTE: Get the next frame's index
     // TODO: Confirm that this is updated by the call to Present.
     game_state->d3d_context.current_frame_idx = game_state->d3d_context.swapchain->GetCurrentBackBufferIndex();
-
-    /*
-    // setPipeline(cmd_buf, game_state->text_render_pipeline);
-    // drawCall(cmd_buf, 6);
-    */
 
     clearArena(&game_state->frame_arena);
 }

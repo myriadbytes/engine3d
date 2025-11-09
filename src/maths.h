@@ -220,7 +220,15 @@ inline f32 dot(v3 a, v3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+inline f32 dot(v2 a, v2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+
 inline f32 lengthSquared(v3 a) {
+    return dot(a, a);
+}
+
+inline f32 lengthSquared(v2 a) {
     return dot(a, a);
 }
 
@@ -228,7 +236,15 @@ inline f32 length(v3 a) {
     return sqrtf(lengthSquared(a));
 }
 
+inline f32 length(v2 a) {
+    return sqrtf(lengthSquared(a));
+}
+
 inline v3 normalize(v3 a) {
+    return a * (1.0f / length(a));
+}
+
+inline v2 normalize(v2 a) {
     return a * (1.0f / length(a));
 }
 
