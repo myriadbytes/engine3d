@@ -1256,7 +1256,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->orbit_mode = !game_state->orbit_mode;
     }
 
-    /*
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
     // There has to be a better way, maybe recursive ? But that has drawbacks too.
     if (input->kb.keys[SCANCODE_SPACE].is_down || input->ctrl.a.is_down) {
@@ -1267,13 +1266,13 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         // NOTE: If the player is inside a chunk already, we don't have to do a raycast the first time.
         // This would be the default case once the world is entirely filled with chunks, but not for now.
-        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
-            u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
-            u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
-            u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
+        for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
+            Chunk* chunk = getChunkByIndex(&game_state->world, chunk_idx);
+            if (!chunk) continue;
 
-            v3 chunk_bb_min = {(f32)(chunk_origin_x), (f32)(chunk_origin_y), (f32)(chunk_origin_z)};
-            v3 chunk_bb_max = {(f32)(chunk_origin_x+CHUNK_W), (f32)(chunk_origin_y+CHUNK_W), (f32)(chunk_origin_z+CHUNK_W)};
+            v3 chunk_world_pos = chunkToWorldPos(chunk->chunk_position);
+            v3 chunk_bb_min = {(f32)(chunk_world_pos.x), (f32)(chunk_world_pos.y), (f32)(chunk_world_pos.z)};
+            v3 chunk_bb_max = {(f32)(chunk_world_pos.x+CHUNK_W), (f32)(chunk_world_pos.y+CHUNK_W), (f32)(chunk_world_pos.z+CHUNK_W)};
 
             if (point_inclusion_aabb(game_state->player_position, chunk_bb_min, chunk_bb_max)) {
                 chunk_to_traverse = chunk_idx;
@@ -1292,13 +1291,13 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             // so that each iteration traverses the next chunk along the line of sight, until a block is found.
             f32 closest_t_during_search = INFINITY;
             if (!found_chunk) {
-                for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
-                    u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
-                    u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
-                    u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
+                for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
+                    Chunk* chunk = getChunkByIndex(&game_state->world, chunk_idx);
+                    if (!chunk) continue;
 
-                    v3 chunk_bb_min = {(f32)(chunk_origin_x), (f32)(chunk_origin_y), (f32)(chunk_origin_z)};
-                    v3 chunk_bb_max = {(f32)(chunk_origin_x+CHUNK_W), (f32)(chunk_origin_y+CHUNK_W), (f32)(chunk_origin_z+CHUNK_W)};
+                    v3 chunk_world_pos = chunkToWorldPos(chunk->chunk_position);
+                    v3 chunk_bb_min = {(f32)(chunk_world_pos.x), (f32)(chunk_world_pos.y), (f32)(chunk_world_pos.z)};
+                    v3 chunk_bb_max = {(f32)(chunk_world_pos.x+CHUNK_W), (f32)(chunk_world_pos.y+CHUNK_W), (f32)(chunk_world_pos.z+CHUNK_W)};
 
                     f32 hit_t;
                     b32 did_hit = raycast_aabb(game_state->player_position, game_state->camera_forward, chunk_bb_min, chunk_bb_max, &hit_t);
@@ -1319,21 +1318,19 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             }
 
             if (found_chunk) {
-                u32 chunk_origin_x = (chunk_to_traverse % WORLD_W) * CHUNK_W;
-                u32 chunk_origin_y = ((chunk_to_traverse / WORLD_W) % WORLD_H) * CHUNK_W;
-                u32 chunk_origin_z = (chunk_to_traverse / (WORLD_W * WORLD_H)) * CHUNK_W;
+                Chunk* chunk = getChunkByIndex(&game_state->world, chunk_to_traverse);
 
-                v3 chunk_to_traverse_origin = v3 {(f32)chunk_origin_x, (f32)chunk_origin_y, (f32)chunk_origin_z};
+                v3 chunk_to_traverse_origin = chunkToWorldPos(chunk->chunk_position);
                 v3 intersection_relative = traversal_origin - chunk_to_traverse_origin;
 
                 usize block_idx;
-                if (raycast_chunk_traversal(&game_state->world[chunk_to_traverse], intersection_relative, game_state->camera_forward, &block_idx)) {
-                    game_state->world[chunk_to_traverse].data[block_idx] = 0;
+                if (raycast_chunk_traversal(chunk, intersection_relative, game_state->camera_forward, &block_idx)) {
+                    chunk->data[block_idx] = 0;
                     // FIXME: This is a quick temporary fix. Without that, we could modify the vertex buffer while it is used to render the previous
                     // frame. I would need profiling to know if it's THAT bad. A possible solution would be to decouple mesh generation and upload,
                     // i.e. generate the mesh but only upload it after the previous frame is rendered. Perhaps in a separate thread.
                     waitForGPU(&game_state->d3d_context);
-                    refreshChunk(&game_state->d3d_context, &game_state->world[chunk_to_traverse]);
+                    refreshChunk(&game_state->d3d_context, chunk);
                     break;
                 }
 
@@ -1346,7 +1343,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             }
         }
     }
-    */
 
     // NOTE: Unload chunks too far from the player
     for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
@@ -1521,7 +1517,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     char debug_text_string[256];
     v3i chunk_position = worldPosToChunk(game_state->player_position);
     StringCbPrintf(debug_text_string, ARRAY_COUNT(debug_text_string),
-                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\nEmpty: %d %s\nOccupied: %d\nReusable: %d",
+                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\n\nEmpty: %d %s\nOccupied: %d\nReusable: %d\n\nPool: %d/%d",
                    game_state->player_position.x,
                    game_state->player_position.y,
                    game_state->player_position.z,
@@ -1531,7 +1527,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                    game_state->world.nb_empty,
                    game_state->world.nb_empty < 25 ? "!!!" : "",
                    game_state->world.nb_occupied,
-                   game_state->world.nb_reusable
+                   game_state->world.nb_reusable,
+                   CHUNK_POOL_SIZE - (game_state->chunk_pool.free_slots_stack_ptr - game_state->chunk_pool.free_slots),
+                   CHUNK_POOL_SIZE
     );
     drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, debug_text_string, 0, 0);
 

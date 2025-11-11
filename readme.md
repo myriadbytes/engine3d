@@ -41,8 +41,6 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 
 ### Engine:
 - [x] Game code hot-reloading
-- [x] Basic PNG decoder
-- [x] Debug text rendering using a bitmap font
 - [x] Keyboard & controller input processing (using the Windows 10+ GameInput lib)
 - [x] Generating `compile_commands.json` inside the build script
 - [ ] Shaders hot-reloading
@@ -56,6 +54,8 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 - [ ] Thread pool ?? For async asset streaming
 
 ### Game:
+- [x] Basic PNG decoder
+- [x] Debug text rendering using a bitmap font
 - [x] Single-Threaded chunk streaming system
 - [x] Procedular heightmap with simplex noise
 - [ ] Greedy meshing
