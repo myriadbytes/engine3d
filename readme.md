@@ -56,7 +56,7 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 - [ ] Thread pool ?? For async asset streaming
 
 ### Game:
-- [ ] Chunk data streaming system
+- [x] Single-Threaded chunk streaming system
 - [x] Procedular heightmap with simplex noise
 - [ ] Greedy meshing
 - [ ] Asynchronous GPU transfer for the meshes

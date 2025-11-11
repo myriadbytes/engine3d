@@ -8,6 +8,7 @@ game_dll_name = "game.dll"
 defines = {"ENGINE_SLOW": "1", "ENGINE_INTERNAL": "1"}
 compiler_flags = [
     "-g",
+    #    "-O3",
     "-fdiagnostics-absolute-paths",
     "-Wall",
     "-Wno-missing-braces",
@@ -22,8 +23,15 @@ generate_compile_commands = True
 
 # FILES
 platform_source_files = ["src/win32_platform.cpp"]
-game_source_files = ["src/game.cpp", "src/maths.cpp", "src/noise.cpp", "src/img.cpp"]
-common_source_files = ["src/arena.cpp"]
+game_source_files = [
+    "src/game.cpp",
+    "src/arena.cpp",
+    "src/maths.cpp",
+    "src/noise.cpp",
+    "src/img.cpp",
+    "src/world.cpp",
+]
+common_source_files = []
 
 assets_directories = ["shaders", "assets"]
 

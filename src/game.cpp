@@ -10,6 +10,7 @@
 #include "maths.h"
 #include "noise.h"
 #include "img.h"
+#include "world.h"
 
 constexpr usize FRAMES_IN_FLIGHT = 2;
 
@@ -279,7 +280,6 @@ void readAndCompileShaders(const char* path, ID3DBlob** vertex_shader, ID3DBlob*
     ASSERT(SUCCEEDED(fragment_shader_err));
 }
 
-
 void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipeline, D3DPipeline* wireframe_pipeline) {
         ID3DBlob* chunk_vertex_shader;
         ID3DBlob* chunk_fragment_shader;
@@ -320,7 +320,6 @@ void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipe
         ASSERT(chunk_serialize_err == NULL);
         HRESULT chunk_signature_res = d3d_context->device->CreateRootSignature(0, chunk_serialized_signature->GetBufferPointer(), chunk_serialized_signature->GetBufferSize(), IID_PPV_ARGS(&chunk_pipeline->root_signature));
         ASSERT(SUCCEEDED(chunk_signature_res));
-
 
         // NOTE: Root signature with 3 constants :
         // - Model matrix
@@ -579,7 +578,7 @@ void initializeTextRendering(D3DContext* d3d_context, TextRenderer* to_init, Are
         readAndCompileShaders("./shaders/bitmap_text.hlsl", &text_vertex_shader, &text_fragment_shader);
 
         // NOTE: Root signature with 1 descriptor table containing the
-        // bitmap font descriptor, a transform matrix and the ascii code. 
+        // bitmap font descriptor, a transform matrix and the ascii code.
         D3D12_DESCRIPTOR_RANGE range;
         range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         range.NumDescriptors = 1;
@@ -783,7 +782,7 @@ void initializeTextRendering(D3DContext* d3d_context, TextRenderer* to_init, Are
         heapDesc.NumDescriptors = 1;
         heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE; // Important!
-    
+
         HRESULT descriptor_heap_res = d3d_context->device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&to_init->font_texture_descriptor_heap));
         ASSERT(SUCCEEDED(descriptor_heap_res));
         // u32 srv_descriptor_size = d3d_context->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -793,49 +792,10 @@ void initializeTextRendering(D3DContext* d3d_context, TextRenderer* to_init, Are
         srvDesc.Format = texture_buffer_resource_desc.Format;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = 1;
-    
+
         D3D12_CPU_DESCRIPTOR_HANDLE srv_handle = to_init->font_texture_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-    
+
         d3d_context->device->CreateShaderResourceView(to_init->font_texture_buffer, &srvDesc, srv_handle);
-}
-
-constexpr usize CHUNK_W = 16;
-
-constexpr usize WORLD_W = 16;
-constexpr usize WORLD_H = 2;
-
-// NOTE: This is the worst case number of vertices that would be needed for a chunk mesh (with a "checkerboard" chunk).
-// This stops being true once we add transparent blocks. Too bad !
-constexpr usize WORST_CASE_CHUNK_VERTICES = ((CHUNK_W * CHUNK_W * CHUNK_W) / 2) * 6 * 2 * 3;
-
-struct ChunkVertex {
-    v3 position;
-    v3 normal;
-};
-
-struct Chunk {
-    u32 data[CHUNK_W * CHUNK_W * CHUNK_W];
-    usize vertices_count;
-    ID3D12Resource* upload_buffer;
-    ID3D12Resource* vertex_buffer;
-    b32 vbo_ready;
-};
-
-v3i worldPosToChunk(v3 world_pos) {
-    v3 chunk_pos = world_pos / CHUNK_W;
-    v3i truncated = {
-        (i32)chunk_pos.x,
-        (i32)chunk_pos.y,
-        (i32)chunk_pos.z,
-    };
-
-    v3i floored = {
-        (chunk_pos.x < (f32)truncated.x) ? truncated.x - 1 : truncated.x,
-        (chunk_pos.y < (f32)truncated.y) ? truncated.y - 1 : truncated.y,
-        (chunk_pos.z < (f32)truncated.z) ? truncated.z - 1 : truncated.z,
-    };
-
-    return floored;
 }
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
@@ -1099,74 +1059,6 @@ void waitForGPU(D3DContext* d3d_context) {
     }
 }
 
-// TODO: I'm 99% sure that it is not necessary at all to have one upload buffer per
-// chunk. There should just be a pool of n upload buffers that all chunk share.
-void createChunkGPUBuffers(D3DContext* d3d_context, Chunk* chunk) {
-
-    // NOTE: Creates a CPU-side heap + buffer that can be used to transfer data to the GPU
-    D3D12_HEAP_PROPERTIES upload_heap_props = {};
-    upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
-    upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    upload_heap_props.CreationNodeMask = 1;
-    upload_heap_props.VisibleNodeMask = 1;
-
-    D3D12_RESOURCE_DESC upload_heap_resource_desc = {};
-    upload_heap_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    upload_heap_resource_desc.Alignment = 0;
-    upload_heap_resource_desc.Width = WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex); // This is the only field that really matters.
-    upload_heap_resource_desc.Height = 1;
-    upload_heap_resource_desc.DepthOrArraySize = 1;
-    upload_heap_resource_desc.MipLevels = 1;
-    upload_heap_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-    upload_heap_resource_desc.SampleDesc.Count = 1;
-    upload_heap_resource_desc.SampleDesc.Quality = 0;
-    upload_heap_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    upload_heap_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-    HRESULT upload_buffer_creation_res = d3d_context->device->CreateCommittedResource(
-        &upload_heap_props,
-        D3D12_HEAP_FLAG_NONE,
-        &upload_heap_resource_desc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, // this is from the GPU's perspective
-        NULL,
-        IID_PPV_ARGS(&chunk->upload_buffer)
-    );
-    ASSERT(SUCCEEDED(upload_buffer_creation_res));
-
-    D3D12_HEAP_PROPERTIES heap_props = {};
-    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
-    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-    heap_props.CreationNodeMask = 1;
-    heap_props.VisibleNodeMask = 1;
-
-    D3D12_RESOURCE_DESC buffer_resource_desc = {};
-    buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer_resource_desc.Alignment = 0;
-    buffer_resource_desc.Width = WORST_CASE_CHUNK_VERTICES * sizeof(ChunkVertex);
-    buffer_resource_desc.Height = 1;
-    buffer_resource_desc.DepthOrArraySize = 1;
-    buffer_resource_desc.MipLevels = 1;
-    buffer_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-    buffer_resource_desc.SampleDesc.Count = 1;
-    buffer_resource_desc.SampleDesc.Quality = 0;
-    buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-    HRESULT buffer_creation_res = d3d_context->device->CreateCommittedResource(
-        &heap_props,
-        D3D12_HEAP_FLAG_NONE,
-        &buffer_resource_desc,
-        D3D12_RESOURCE_STATE_COMMON,
-        NULL,
-        IID_PPV_ARGS(&chunk->vertex_buffer)
-    );
-    ASSERT(SUCCEEDED(buffer_creation_res));
-
-    chunk->vbo_ready = false;
-}
-
 // TODO: Switch away from null-terminated strings.
 // NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
 void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandList* command_list, const char* text, u32 start_row, u32 start_col) {
@@ -1187,7 +1079,7 @@ void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandLis
     command_list->SetDescriptorHeaps(1, &text_renderer->font_texture_descriptor_heap);
     D3D12_GPU_DESCRIPTOR_HANDLE gpu_texture_handle = text_renderer->font_texture_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
     command_list->SetGraphicsRootDescriptorTable(0, gpu_texture_handle);
-            
+
     // NOTE: https://datagoblin.itch.io/monogram
     // The bitmap font is 96x96 and has 16x8 chars, so the individual
     // characters are 6x12.
@@ -1196,7 +1088,7 @@ void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandLis
     // - 5px for all chars
     // - 2px descender on some chars
     // - 3px padding on the bottom
-    // And the horizontal layout is : 
+    // And the horizontal layout is :
     // - 1px padding on the left
     // - 5px for all chars
     // So when laying out chars on a grid, there is already a horizontal
@@ -1207,7 +1099,7 @@ void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandLis
     constexpr f32 char_scale = 0.04f; // TODO: Make this configurable ?
     constexpr f32 char_width = (char_ratio * char_scale) * 2;
     constexpr f32 char_height = (char_scale) * 2;
-        
+
     // NOTE: The shader produce a quad that covers the whole screen.
     // We need to make it a quad of the right proportions and
     // located in the first slot.
@@ -1251,7 +1143,8 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    Chunk world[WORLD_W * WORLD_H * WORLD_W];
+    ChunkMemoryPool chunk_pool;
+    WorldHashMap world;
 
     D3DPipeline chunk_render_pipeline;
     D3DPipeline wireframe_render_pipeline;
@@ -1280,7 +1173,14 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->frame_arena.base = game_state->frame_arena_memory;
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
-        game_state->player_position = {0, 40, 0};
+        game_state->d3d_context = initializeD3D12(true);
+
+        initChunkMemoryPool(&game_state->chunk_pool, game_state->d3d_context.device);
+        game_state->world.nb_empty = HASHMAP_SIZE;
+        game_state->world.nb_occupied = 0;
+        game_state->world.nb_reusable = 0;
+
+        game_state->player_position = {110, 40, 110};
         game_state->orbit_mode = false;
         game_state->time = 0;
         game_state->camera_pitch = -1 * PI32 / 6;
@@ -1288,40 +1188,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
 
-        game_state->d3d_context = initializeD3D12(true);
         createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
-
-        for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
-
-            u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
-            u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
-            u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
-
-            for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
-                u32 block_x = chunk_origin_x + (block_idx % CHUNK_W);
-                u32 block_y = chunk_origin_y + (block_idx / CHUNK_W) % (CHUNK_W);
-                u32 block_z = chunk_origin_z + (block_idx / (CHUNK_W * CHUNK_W));
-
-                // TODO: This needs to be parameterized and put into a function.
-                // The fancy name is "fractal brownian motion", but it's just summing
-                // noise layers with reducing intensity and increasing frequency.
-                f32 space_scaling_factor = 0.01;
-                f32 height_intensity = 20.0;
-                f32 height = 0;
-                for (i32 octave = 0; octave < 3; octave ++) {
-                    height += ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
-                    space_scaling_factor *= 2.f;
-                    height_intensity /= 2.f;
-                }
-
-                if (block_y <= height) {
-                    game_state->world[chunk_idx].data[block_idx] = 1;
-                }
-            }
-
-            createChunkGPUBuffers(&game_state->d3d_context, &game_state->world[chunk_idx]);
-            refreshChunk(&game_state->d3d_context, &game_state->world[chunk_idx]);
-        }
 
         initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
 
@@ -1331,66 +1198,55 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     // SIMULATION
     game_state->time += dt;
 
-    if (!game_state->orbit_mode) {
-        f32 mouse_sensitivity = 0.01;
-        f32 stick_sensitivity = 0.05;
+    f32 mouse_sensitivity = 0.01;
+    f32 stick_sensitivity = 0.05;
 
-        game_state->camera_pitch += input->kb.mouse_delta.y * mouse_sensitivity;
-        game_state->camera_yaw += input->kb.mouse_delta.x * mouse_sensitivity;
+    game_state->camera_pitch += input->kb.mouse_delta.y * mouse_sensitivity;
+    game_state->camera_yaw += input->kb.mouse_delta.x * mouse_sensitivity;
 
-        game_state->camera_pitch += input->ctrl.right_stick.y * stick_sensitivity;
-        game_state->camera_yaw += input->ctrl.right_stick.x * stick_sensitivity;
+    game_state->camera_pitch += input->ctrl.right_stick.y * stick_sensitivity;
+    game_state->camera_yaw += input->ctrl.right_stick.x * stick_sensitivity;
 
-        f32 safe_pitch = PI32 / 2.f - 0.05f;
-        game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
+    f32 safe_pitch = PI32 / 2.f - 0.05f;
+    game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
 
-        game_state->camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
-        game_state->camera_forward.y = sinf(game_state->camera_pitch);
-        game_state->camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
+    game_state->camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
+    game_state->camera_forward.y = sinf(game_state->camera_pitch);
+    game_state->camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
 
-        v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
+    v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
 
-        f32 speed = 20 * dt;
-        if (input->kb.keys[SCANCODE_LSHIFT].is_down || input->ctrl.x.is_down) {
-            speed *= 5;
-        }
-
-        // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
-        // Let's just say it's a Quake reference.
-        // Also you can move twice as fast by using a keyboard and a controller at the same time.
-        // That's for speedrunners.
-
-        if(input->kb.keys[SCANCODE_Q].is_down || input->ctrl.lb.is_down) {
-            game_state->player_position.y -= speed;
-        }
-        if(input->kb.keys[SCANCODE_E].is_down || input->ctrl.rb.is_down) {
-            game_state->player_position.y += speed;
-        }
-        if(input->kb.keys[SCANCODE_A].is_down) {
-            game_state->player_position += -camera_right * speed;
-        }
-        if(input->kb.keys[SCANCODE_D].is_down) {
-            game_state->player_position += camera_right * speed;
-        }
-        if(input->kb.keys[SCANCODE_S].is_down) {
-            game_state->player_position += -game_state->camera_forward * speed;
-        }
-        if(input->kb.keys[SCANCODE_W].is_down) {
-            game_state->player_position += game_state->camera_forward * speed;
-        }
-
-        game_state->player_position += input->ctrl.left_stick.x * camera_right * speed;
-        game_state->player_position += input->ctrl.left_stick.y * game_state->camera_forward * speed;
-    } else {
-        f32 orbit_speed = 1.f;
-        f32 orbit_distance = 80.f;
-        f32 orbit_height = 50.f;
-        v3 orbit_center = v3 { ((f32)WORLD_W/2) * CHUNK_W, 0, ((f32)WORLD_W/2) * CHUNK_W };
-
-        f32 orbit_t = game_state->time * orbit_speed;
-        game_state->player_position = orbit_center + v3 {cosf(orbit_t) * orbit_distance, orbit_height, sinf(orbit_t) * orbit_distance};
-        game_state->camera_forward = normalize(orbit_center - game_state->player_position);
+    f32 speed = 20 * dt;
+    if (input->kb.keys[SCANCODE_LSHIFT].is_down || input->ctrl.x.is_down) {
+        speed *= 5;
     }
+
+    // TODO: Nothing is normalized, so the player moves faster in diagonal directions.
+    // Let's just say it's a Quake reference.
+    // Also you can move twice as fast by using a keyboard and a controller at the same time.
+    // That's for speedrunners.
+
+    if(input->kb.keys[SCANCODE_Q].is_down || input->ctrl.lb.is_down) {
+        game_state->player_position.y -= speed;
+    }
+    if(input->kb.keys[SCANCODE_E].is_down || input->ctrl.rb.is_down) {
+        game_state->player_position.y += speed;
+    }
+    if(input->kb.keys[SCANCODE_A].is_down) {
+        game_state->player_position += -camera_right * speed;
+    }
+    if(input->kb.keys[SCANCODE_D].is_down) {
+        game_state->player_position += camera_right * speed;
+    }
+    if(input->kb.keys[SCANCODE_S].is_down) {
+        game_state->player_position += -game_state->camera_forward * speed;
+    }
+    if(input->kb.keys[SCANCODE_W].is_down) {
+        game_state->player_position += game_state->camera_forward * speed;
+    }
+
+    game_state->player_position += input->ctrl.left_stick.x * camera_right * speed;
+    game_state->player_position += input->ctrl.left_stick.y * game_state->camera_forward * speed;
 
     if (input->kb.keys[SCANCODE_G].is_down && input->kb.keys[SCANCODE_G].transitions == 1) {
         game_state->is_wireframe = !game_state->is_wireframe;
@@ -1400,6 +1256,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->orbit_mode = !game_state->orbit_mode;
     }
 
+    /*
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
     // There has to be a better way, maybe recursive ? But that has drawbacks too.
     if (input->kb.keys[SCANCODE_SPACE].is_down || input->ctrl.a.is_down) {
@@ -1489,6 +1346,75 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             }
         }
     }
+    */
+
+    // NOTE: Unload chunks too far from the player
+    for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
+        Chunk* chunk = getChunkByIndex(&game_state->world, chunk_idx);
+        if (!chunk) continue;
+
+        v3 chunk_to_unload_world_pos = chunkToWorldPos(chunk->chunk_position);
+        v3 chunk_to_unload_center_pos = chunk_to_unload_world_pos + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+        v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+        f32 dist = length(player_chunk_center_pos - chunk_to_unload_center_pos);
+        if (dist > (f32)LOAD_RADIUS * CHUNK_W) {
+            // NOTE: This chunk is too far away and needs to be unloaded.     
+            
+            worldDelete(&game_state->world, chunk->chunk_position);
+            releaseChunkMemoryToPool(&game_state->chunk_pool, chunk);
+        }
+    }
+
+    // NOTE: Load new chunks as needed
+    v3i player_chunk_pos = worldPosToChunk(game_state->player_position);
+    for (i32 x = player_chunk_pos.x - LOAD_RADIUS; x <= player_chunk_pos.x + LOAD_RADIUS; x++) {
+        for (i32 y = player_chunk_pos.y - LOAD_RADIUS; y <= player_chunk_pos.y + LOAD_RADIUS; y++) {
+            for (i32 z = player_chunk_pos.z - LOAD_RADIUS; z <= player_chunk_pos.z + LOAD_RADIUS; z++) {
+
+                v3i chunk_to_load_pos = v3i {x, y, z};
+                v3 chunk_to_load_world_pos = chunkToWorldPos(chunk_to_load_pos);
+                v3 chunk_to_load_center_pos = chunk_to_load_world_pos + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+                v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+                if (length(player_chunk_center_pos - chunk_to_load_center_pos) > (f32)LOAD_RADIUS * CHUNK_W) continue; 
+
+                if (!isChunkInWorld(&game_state->world, chunk_to_load_pos)) {
+                    Chunk* chunk = acquireChunkMemoryFromPool(&game_state->chunk_pool);
+                    chunk->chunk_position = chunk_to_load_pos;
+
+                    for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
+                        u32 block_x = chunk_to_load_pos.x * CHUNK_W + (block_idx % CHUNK_W);
+                        u32 block_y = chunk_to_load_pos.y * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
+                        u32 block_z = chunk_to_load_pos.z * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
+
+                        // TODO: This needs to be parameterized and put into a function.
+                        // The fancy name is "fractal brownian motion", but it's just summing
+                        // noise layers with reducing intensity and increasing frequency.
+                        f32 space_scaling_factor = 0.01;
+                        f32 height_intensity = 32.0;
+                        f32 height = 0;
+                        for (i32 octave = 0; octave < 3; octave ++) {
+                            height += ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
+                            space_scaling_factor *= 2.f;
+                            height_intensity /= 2.f;
+                        }
+
+                        if (block_y <= height) {
+                            chunk->data[block_idx] = 1;
+                        } else {
+                            chunk->data[block_idx] = 0;
+                        }
+                    }
+
+                    refreshChunk(&game_state->d3d_context, chunk);
+                    worldInsert(&game_state->world, chunk_to_load_pos, chunk);
+                }
+            }
+        }
+    }
 
     // RENDERING
 
@@ -1559,14 +1485,12 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     m4 fused_perspective_view = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
     current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, fused_perspective_view.data, 0);
 
-    for (usize chunk_idx = 0; chunk_idx < WORLD_W * WORLD_H * WORLD_W; chunk_idx++) {
-        u32 chunk_origin_x = (chunk_idx % WORLD_W) * CHUNK_W;
-        u32 chunk_origin_y = ((chunk_idx / WORLD_W) % WORLD_H) * CHUNK_W;
-        u32 chunk_origin_z = (chunk_idx / (WORLD_W * WORLD_H)) * CHUNK_W;
+    for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
 
-        Chunk* chunk = &game_state->world[chunk_idx];
+        Chunk* chunk = getChunkByIndex(&game_state->world, chunk_idx);
+        if (!chunk) continue;
 
-        m4 chunk_model = makeTranslation(v3 {(f32)chunk_origin_x, (f32)chunk_origin_y, (f32)chunk_origin_z});
+        m4 chunk_model = makeTranslation(chunkToWorldPos(chunk->chunk_position));
         current_frame->command_list->SetGraphicsRoot32BitConstants(0, 16, chunk_model.data, 0);
 
         // NOTE: If the chunk has just been updated, it needs to be transitioned
@@ -1594,18 +1518,22 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     }
 
     // NOTE: Text rendering test.
-    char player_pos_string[256];
+    char debug_text_string[256];
     v3i chunk_position = worldPosToChunk(game_state->player_position);
-    StringCbPrintf(player_pos_string, ARRAY_COUNT(player_pos_string),
-                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d",
+    StringCbPrintf(debug_text_string, ARRAY_COUNT(debug_text_string),
+                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\nEmpty: %d %s\nOccupied: %d\nReusable: %d",
                    game_state->player_position.x,
                    game_state->player_position.y,
                    game_state->player_position.z,
                    chunk_position.x,
                    chunk_position.y,
-                   chunk_position.z
+                   chunk_position.z,
+                   game_state->world.nb_empty,
+                   game_state->world.nb_empty < 25 ? "!!!" : "",
+                   game_state->world.nb_occupied,
+                   game_state->world.nb_reusable
     );
-    drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, player_pos_string, 0, 0);
+    drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, debug_text_string, 0, 0);
 
     // NOTE: The backbuffer should be transitionned to be used for presentation.
     D3D12_RESOURCE_BARRIER present_barrier = {};

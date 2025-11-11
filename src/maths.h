@@ -5,7 +5,17 @@
 #include <math.h>
 #include "common.h"
 
+// MATH OPERATIONS
+// NOTE: They are prefixed with "m" in order
+// to not collide with the math.h functions
+// until we stop including it.
+
 #define PI32 3.14159265359f
+
+inline i32 mfloor(f32 x) {
+    i32 truncated = (i32)x;
+    return x < truncated ? (truncated - 1) : truncated;
+}
 
 // MATRIX STRUCTURES
 
@@ -126,14 +136,14 @@ inline v2& operator+= (v2& a, v2 b) {
     return a;
 }
 
-inline v3 operator += (v3& a, v3 b) {
+inline v3 operator+= (v3& a, v3 b) {
     a.x += b.x;
     a.y += b.y;
     a.z += b.z;
     return a;
 }
 
-inline v4 operator += (v4& a, v4 b) {
+inline v4 operator+= (v4& a, v4 b) {
     a.x += b.x;
     a.y += b.y;
     a.z += b.z;
@@ -274,6 +284,11 @@ inline v4 operator/ (v4 a, f32 scalar) {
     return result;
 }
 
+inline bool operator== (v3i& a, v3i& b) {
+    return a.x == b.x
+    &&     a.y == b.y
+    &&     a.z == b.z;   
+}
 // MATRIX FUNCTIONS
 
 inline f32 dot(v3 a, v3 b) {
