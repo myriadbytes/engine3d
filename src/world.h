@@ -28,7 +28,7 @@ inline v3 chunkToWorldPos(v3i chunk_pos) {
 // NOTE: How many chunks to load around the player. A radius of 1 would mean
 // 5 chunks in a diamon pattern, the center one being the chunk the player is
 // inside.
-constexpr i32 LOAD_RADIUS = 4;
+constexpr i32 LOAD_RADIUS = 5;
 
 // NOTE: We'll allocate a pool of chunks at startup, so that there is no memory
 // allocation / VRAM buffer creation at runtime. When we want to load a new chunk,
@@ -54,6 +54,7 @@ struct ChunkMemoryPool {
     Chunk slots[CHUNK_POOL_SIZE];
     usize free_slots[CHUNK_POOL_SIZE];
     usize* free_slots_stack_ptr;
+    u32 nb_used;
 };
 
 void initChunkMemoryPool(ChunkMemoryPool* pool, ID3D12Device* d3d_device);
@@ -70,16 +71,13 @@ void releaseChunkMemoryToPool(ChunkMemoryPool* pool, Chunk* chunk);
 // are no more EMPTY buckets we just get caught in an infinite loop. How
 // come none of the hashmap tutorials I've seen or even LLMs mention that ?
 
-enum WorldEntryState {
-    WORLD_ENTRY_EMPTY,
-    WORLD_ENTRY_OCCUPIED,
-    WORLD_ENTRY_REUSABLE,
-};
-
 struct WorldEntry {
+    usize hash;
     v3i key;
-    Chunk* chunk;
-    WorldEntryState state;
+    Chunk* value;
+
+    b32 is_occupied;
+    u32 home_distance;
 };
 
 // Ideally, we would want the max occupancy of the hash map to be 70%. Using the
@@ -93,13 +91,11 @@ constexpr usize nextPowerOfTwo(usize n) {
     }
     return value;
 }
-constexpr usize HASHMAP_SIZE = nextPowerOfTwo(CHUNK_POOL_SIZE) * 2;
+constexpr usize HASHMAP_SIZE = nextPowerOfTwo(CHUNK_POOL_SIZE);
 
 struct WorldHashMap {
     WorldEntry entries[HASHMAP_SIZE];
-    usize nb_empty;
     usize nb_occupied;
-    usize nb_reusable;
 };
 
 // NOTE: This is just a helper to iterate over loaded chunks

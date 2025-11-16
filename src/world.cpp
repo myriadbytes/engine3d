@@ -74,6 +74,7 @@ void allocateChunkGPUBuffers(ID3D12Device* d3d_device, Chunk* chunk) {
 
 void initChunkMemoryPool(ChunkMemoryPool* pool, ID3D12Device* d3d_device) {
     // TODO: Zero out the memory ?
+    pool->nb_used = 0;
 
     // NOTE: Fill the free slots stack with all the indices.
     for (int i = 0; i < CHUNK_POOL_SIZE; i++) {
@@ -96,6 +97,7 @@ Chunk* acquireChunkMemoryFromPool(ChunkMemoryPool* pool) {
     usize slot_idx = *pool->free_slots_stack_ptr;
     pool->free_slots_stack_ptr--;
 
+    pool->nb_used++;
     return &pool->slots[slot_idx];
 }
 
@@ -104,6 +106,8 @@ void releaseChunkMemoryToPool(ChunkMemoryPool* pool, Chunk* chunk) {
 
     pool->free_slots_stack_ptr++;
     *pool->free_slots_stack_ptr = slot_idx;
+
+    pool->nb_used--;
 }
 
 // NOTE: ChatGPT wrote that. I hope it's a good hash.
@@ -118,97 +122,141 @@ usize chunkPositionHash(v3i chunk_position) {
 Chunk* getChunkByIndex(WorldHashMap* world, usize idx) {
     ASSERT(idx < HASHMAP_SIZE);
 
-    if (world->entries[idx].state == WORLD_ENTRY_OCCUPIED) {
-        ASSERT(world->entries[idx].key == world->entries[idx].chunk->chunk_position);
-        return world->entries[idx].chunk;
+    if (world->entries[idx].is_occupied) {
+        ASSERT(world->entries[idx].key == world->entries[idx].value->chunk_position);
+        return world->entries[idx].value;
     } else {
         return NULL;
     }
 }
 
+// NOTE: This is just a hashmap "contains" function.
 b32 isChunkInWorld(WorldHashMap* world, v3i chunk_position) {
     usize hash = chunkPositionHash(chunk_position);
     usize idx = hash % HASHMAP_SIZE;
+    u32 lookup_home_dist = 0;
 
-    while (world->entries[idx].state != WORLD_ENTRY_EMPTY) {
-        if (world->entries[idx].state == WORLD_ENTRY_OCCUPIED
-            && world->entries[idx].key == chunk_position) {
+    while (true) {
+        WorldEntry* iter_entry = &world->entries[idx];
+
+        // NOTE: We have iterated on the whole cluster, arrived at
+        // an empty cell, and didn't find the entry.
+        if (!iter_entry->is_occupied) {
+            return false;
+        };
+
+        // NOTE: A nice property of Robin-Hood hashing is that we
+        // know that a possible new entry would have displaced others
+        // if its home distance gets greater. So if we arrive at this
+        // case we know that the entry was never inserted.
+        if (lookup_home_dist > iter_entry->home_distance) {
+            return false;
+        };
+
+        // NOTE: WE found the it ! Yay !
+        if (iter_entry->key == chunk_position) {
             return true;
         }
 
+        // NOTE: Keep looking forward.
         idx = (idx + 1) % HASHMAP_SIZE;
+        lookup_home_dist++;
     }
-    return false;
 }
 
-// TODO: Track hashmap utilization using a count variable and a ++ on insertion
-// and a -- on deletion.
+// NOTE: This is called "robin-hood" hashing.
 void worldInsert(WorldHashMap* world, v3i chunk_position, Chunk* chunk) {
     ASSERT(!isChunkInWorld(world, chunk_position));
 
     usize hash = chunkPositionHash(chunk_position);
     usize idx = hash % HASHMAP_SIZE;
 
-    // NOTE: If we found a previously deleted bucket during the probing,
-    // it's better for performance to reuse it instead of taking the empty
-    // bucket at the end. That way, we prevent the clusters from getting too
-    // long too quickly.
-    b32 found_reusable = false;
-    usize reusable_idx = 0;
+    WorldEntry to_insert_entry = {};
+    to_insert_entry.hash = hash;
+    to_insert_entry.key = chunk_position;
+    to_insert_entry.value = chunk;
+    to_insert_entry.is_occupied = true;
+    to_insert_entry.home_distance = 0;
 
-    while (world->entries[idx].state != WORLD_ENTRY_EMPTY) {
+    // TODO: Error when trying to insert at a chunk position where a chunk
+    // is already loaded.
+    while (true) {
+        WorldEntry* iter_entry = &world->entries[idx];
 
-        // NOTE: I don't know what should happen if I try to insert a chunk
-        // at a position where a chunk is already loaded. Surely that sounds
-        // like an error ?
-        if (world->entries[idx].state == WORLD_ENTRY_OCCUPIED
-            && world->entries[idx].key == chunk_position) {
-            ASSERT(false);
-        }
-        // NOTE: Found a possible bucket for the new chunk handle.
-        else if (world->entries[idx].state == WORLD_ENTRY_REUSABLE
-            && !found_reusable) {
-            found_reusable = true;
-            reusable_idx = idx;
+        // NOTE: We found an empty slot. Insert the entry to be inserted.
+        if (!iter_entry->is_occupied) {
+            *iter_entry = to_insert_entry;
+            world->nb_occupied++;
+            break;
         }
 
+        // NOTE: We found an entry that is closer to home than the
+        // entry to be inserted. The new entry gets that spot,
+        // and the entry to be inserted is now the entry that was
+        // at that spot.
+        if (iter_entry->home_distance < to_insert_entry.home_distance) {
+            WorldEntry tmp = *iter_entry;
+            *iter_entry = to_insert_entry;
+            to_insert_entry = tmp;
+        }
+
+        // NOTE: Move forward in the buckets, looping around if necessary.
         idx = (idx + 1) % HASHMAP_SIZE;
+        to_insert_entry.home_distance++;
     }
-
-    if (found_reusable) idx = reusable_idx;
-
-    if (!found_reusable) {
-        world->nb_empty--;
-    } else {
-        world->nb_reusable--;
-    }
-    world->nb_occupied++;
-
-    world->entries[idx].key = chunk_position;
-    world->entries[idx].chunk = chunk;
-    world->entries[idx].state = WORLD_ENTRY_OCCUPIED;
 }
 
+// NOTE: This is called "backward-shift deletion".
 void worldDelete(WorldHashMap* world, v3i chunk_position) {
-    
+
     usize hash = chunkPositionHash(chunk_position);
     usize idx = hash % HASHMAP_SIZE;
+    u32 lookup_home_dist = 0;
 
-    while (world->entries[idx].state != WORLD_ENTRY_EMPTY) {
+    // NOTE: Find the entry to delete.
+    while (true) {
+        WorldEntry* iter_entry = &world->entries[idx];
 
-        if (world->entries[idx].state == WORLD_ENTRY_OCCUPIED
-            && world->entries[idx].key == chunk_position) {
-            world->nb_occupied--;
-            world->nb_reusable++;
-            world->entries[idx].state = WORLD_ENTRY_REUSABLE;
-            return;
+        if ((!iter_entry->is_occupied) || (lookup_home_dist > iter_entry->home_distance)) {
+            // NOTE: I think that trying to delete a chunk that is not loaded
+            // indicates a logic error in some other code.
+            ASSERT(false);
+        };
+
+        // NOTE: WE found the it ! Yay !
+        if (iter_entry->key == chunk_position) {
+            break;
         }
 
+        // NOTE: Keep looking forward.
         idx = (idx + 1) % HASHMAP_SIZE;
+        lookup_home_dist++;
     }
 
-    // NOTE: We didn't find a chunk in the hashmap with this position.
-    // I think this should be an error if I try to unload a chunk that's
-    // not loaded.
-    ASSERT(false);
+    // NOTE: Delete the entry.
+    world->entries[idx] = {};
+    world->nb_occupied--;
+
+    // NOTE: Shift all subsequent entries to prevent any hole from forming
+    // and to bring the entries closer to their "home" bucket.
+    usize backshift_idx = idx;
+    while (true) {
+        WorldEntry* iter_entry = &world->entries[backshift_idx];
+        WorldEntry* next_entry = &world->entries[(backshift_idx + 1) % HASHMAP_SIZE];
+
+        // NOTE: Stop when:
+        // - We're at the end of the cluster
+        // - The next entry is already where it should be.
+        if (!next_entry->is_occupied) return;
+        if (next_entry->home_distance == 0) return;
+
+        // NOTE: Shift the next entry back, and clear its old bucket in
+        // case this is the last shift : we don't want any duplicate entries.
+        *iter_entry = *next_entry;
+        iter_entry->home_distance--;
+        *next_entry = {};
+
+        // NOTE: Continue to iterate forward.
+        backshift_idx = (backshift_idx + 1) % HASHMAP_SIZE;
+    }
 }

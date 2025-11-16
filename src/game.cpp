@@ -1176,9 +1176,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->d3d_context = initializeD3D12(true);
 
         initChunkMemoryPool(&game_state->chunk_pool, game_state->d3d_context.device);
-        game_state->world.nb_empty = HASHMAP_SIZE;
         game_state->world.nb_occupied = 0;
-        game_state->world.nb_reusable = 0;
 
         game_state->player_position = {110, 40, 110};
         game_state->orbit_mode = false;
@@ -1356,8 +1354,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         f32 dist = length(player_chunk_center_pos - chunk_to_unload_center_pos);
         if (dist > (f32)LOAD_RADIUS * CHUNK_W) {
-            // NOTE: This chunk is too far away and needs to be unloaded.     
-            
+            // NOTE: This chunk is too far away and needs to be unloaded.
+
             worldDelete(&game_state->world, chunk->chunk_position);
             releaseChunkMemoryToPool(&game_state->chunk_pool, chunk);
         }
@@ -1375,7 +1373,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
                 v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
 
-                if (length(player_chunk_center_pos - chunk_to_load_center_pos) > (f32)LOAD_RADIUS * CHUNK_W) continue; 
+                if (length(player_chunk_center_pos - chunk_to_load_center_pos) > (f32)LOAD_RADIUS * CHUNK_W) continue;
 
                 if (!isChunkInWorld(&game_state->world, chunk_to_load_pos)) {
                     Chunk* chunk = acquireChunkMemoryFromPool(&game_state->chunk_pool);
@@ -1392,10 +1390,10 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                         f32 space_scaling_factor = 0.01;
                         f32 height_intensity = 32.0;
                         f32 height = 0;
-                        for (i32 octave = 0; octave < 3; octave ++) {
+                        for (i32 octave = 0; octave < 5; octave ++) {
                             height += ((simplex_noise_2d(game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
                             space_scaling_factor *= 2.f;
-                            height_intensity /= 2.f;
+                            height_intensity /= 3.f;
                         }
 
                         if (block_y <= height) {
@@ -1481,10 +1479,13 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     m4 fused_perspective_view = makeProjection(0.1, 1000, 90) * lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
     current_frame->command_list->SetGraphicsRoot32BitConstants(1, 16, fused_perspective_view.data, 0);
 
+    // TODO: We are recoring a draw call both for empty chunks and chunks outside the
+    // player view... This needs culling !!
     for (usize chunk_idx = 0; chunk_idx < HASHMAP_SIZE; chunk_idx++) {
 
         Chunk* chunk = getChunkByIndex(&game_state->world, chunk_idx);
         if (!chunk) continue;
+        if (!chunk->vertices_count) continue;
 
         m4 chunk_model = makeTranslation(chunkToWorldPos(chunk->chunk_position));
         current_frame->command_list->SetGraphicsRoot32BitConstants(0, 16, chunk_model.data, 0);
@@ -1517,18 +1518,16 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     char debug_text_string[256];
     v3i chunk_position = worldPosToChunk(game_state->player_position);
     StringCbPrintf(debug_text_string, ARRAY_COUNT(debug_text_string),
-                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\n\nEmpty: %d %s\nOccupied: %d\nReusable: %d\n\nPool: %d/%d",
+                   "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\n\nWorld: %d/%d\n\nPool: %d/%d",
                    game_state->player_position.x,
                    game_state->player_position.y,
                    game_state->player_position.z,
                    chunk_position.x,
                    chunk_position.y,
                    chunk_position.z,
-                   game_state->world.nb_empty,
-                   game_state->world.nb_empty < 25 ? "!!!" : "",
                    game_state->world.nb_occupied,
-                   game_state->world.nb_reusable,
-                   CHUNK_POOL_SIZE - (game_state->chunk_pool.free_slots_stack_ptr - game_state->chunk_pool.free_slots),
+                   HASHMAP_SIZE,
+                   game_state->chunk_pool.nb_used,
                    CHUNK_POOL_SIZE
     );
     drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, debug_text_string, 0, 0);
