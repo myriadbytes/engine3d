@@ -1,8 +1,6 @@
-#include <d3d12.h>
-#include <d3dcommon.h>
-#include <debugapi.h>
-#include <dxgi1_4.h>
-#include <d3dcompiler.h>
+#include <Windows.h>
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
 #include <strsafe.h>
 
 #include "common.h"
@@ -12,790 +10,237 @@
 #include "img.h"
 #include "world.h"
 
+#define VK_ASSERT(statement)       \
+    {                              \
+        VkResult err = statement;  \
+        ASSERT(err == VK_SUCCESS); \
+    }                              \
+
 constexpr usize FRAMES_IN_FLIGHT = 2;
+constexpr u64 ONE_SECOND_TIMEOUT = 1'000'000'000;
 
-struct D3DFrameContext {
-    ID3D12CommandAllocator* command_allocator;
-    ID3D12GraphicsCommandList* command_list;
-    ID3D12Resource* render_target_resource;
-    D3D12_CPU_DESCRIPTOR_HANDLE render_target_view_descriptor;
-    ID3D12Resource* depth_target_resource;
-    D3D12_CPU_DESCRIPTOR_HANDLE depth_target_view_descriptor;
-    ID3D12Fence* fence;
-    HANDLE fence_wait_event;
-    u64 fence_ready_value;
+struct FrameContext {
+    VkCommandPool cmd_pool;
+    VkCommandBuffer cmd_buffer;
+    VkSemaphore swapchain_semaphore;
+    VkSemaphore render_semaphore;
+    VkFence render_fence;
 };
 
-struct D3DContext {
+struct VulkanContext {
     HWND window;
-    ID3D12Debug* debug_interface;
-
-    ID3D12Device* device;
-    ID3D12CommandQueue* graphics_command_queue;
-
-    ID3D12CommandQueue* copy_command_queue;
-    ID3D12CommandAllocator* copy_allocator;
-    ID3D12GraphicsCommandList* copy_command_list;
-    ID3D12Fence* copy_fence;
-    HANDLE copy_fence_wait_event;
-    u64 copy_fence_ready_value;
-
-    IDXGISwapChain3* swapchain;
-
-    ID3D12DescriptorHeap* rtv_heap;
-    u32 rtv_descriptor_size;
-
-    ID3D12DescriptorHeap* dsv_heap;
-    u32 dsv_descriptor_size;
-
-    D3DFrameContext frames[FRAMES_IN_FLIGHT];
-    u32 current_frame_idx;
+    VkInstance instance;
+    VkSurfaceKHR surface;
+    VkPhysicalDevice physical_device;
+    VkDevice device;
+    VkQueue queue;
+    VkSwapchainKHR swapchain;
+    VkImage swapchain_images[FRAMES_IN_FLIGHT];
+    VkImageView swapchain_images_views[FRAMES_IN_FLIGHT];
+    FrameContext frames[FRAMES_IN_FLIGHT];
+    u64 frames_counter;
 };
 
-struct D3DPipeline {
-    ID3D12RootSignature* root_signature;
-    ID3D12PipelineState* pipeline_state;
-};
+// TODO: Automatic debug mode based on internal / release build.
+b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena) {
+    *to_init = {};
 
-D3DContext initializeD3D12(b32 debug_mode) {
-    // WARNING: This is error prone, but it's annoying to have to pass the HWND
-    // to the game layer just for that.
-    HWND window_handle = FindWindowA("Voxel Game Window Class", nullptr);
+    to_init->frames_counter = 0;
 
-    D3DContext context = {};
-    context.window = window_handle;
+    // NOTE: Vulkan instance creation.
+    VkApplicationInfo app_info = {};
+    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app_info.apiVersion = VK_API_VERSION_1_3;
 
-    // FIXME: release all the COM objects.
+    VkInstanceCreateInfo instance_info = {};
+    instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    instance_info.pApplicationInfo = &app_info;
 
-    if (debug_mode) {
-        HRESULT debug_res = D3D12GetDebugInterface(IID_PPV_ARGS(&context.debug_interface));
-        ASSERT(SUCCEEDED(debug_res));
-        context.debug_interface->EnableDebugLayer();
-    };
+    // FIXME: If the debug mode was enabled but the layers are not present, the
+    // app should not crash and instead should just run without the layers.
+    const char* instance_extensions[] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+    const char* enabled_layers[] = {"VK_LAYER_KHRONOS_validation"};
+    instance_info.ppEnabledExtensionNames = instance_extensions;
+    instance_info.enabledExtensionCount = ARRAY_COUNT(instance_extensions);
+    instance_info.ppEnabledLayerNames = debug_mode ? enabled_layers : nullptr;
+    instance_info.enabledLayerCount = debug_mode ? ARRAY_COUNT(enabled_layers) : 0;
 
-    // NOTE: The factory is used to query for the right GPU device.
-    IDXGIFactory4* factory;
-    HRESULT factory_res = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-    ASSERT(SUCCEEDED(factory_res));
+    VK_ASSERT(vkCreateInstance(&instance_info, nullptr, &to_init->instance));
 
-    IDXGIAdapter1* adapters[8] = {};
-    u32 adapters_count = 0;
-    for (u32 i = 0; i < ARRAY_COUNT(adapters); i++) {
-        HRESULT res = factory->EnumAdapters1(i, &adapters[i]);
-        if (res == DXGI_ERROR_NOT_FOUND) break;
-        adapters_count += 1;
-    }
+    // NOTE: Pick the first physical device.
+    // FIXME: This should loop over the physical devices and find the best one.
+    u32 physical_device_count;
+    vkEnumeratePhysicalDevices(to_init->instance, &physical_device_count, nullptr);
+    VkPhysicalDevice* physical_devices = (VkPhysicalDevice*) pushBytes(scratch_arena, physical_device_count * sizeof(VkPhysicalDevice));
+    vkEnumeratePhysicalDevices(to_init->instance, &physical_device_count, physical_devices);
 
-    // FIXME: this should look for the discrete GPU in priority
-    i32 hardware_adapter_id = -1;
-    for (u32 i = 0; i < adapters_count; i++) {
-        DXGI_ADAPTER_DESC1 desc;
-        HRESULT desc_res = adapters[i]->GetDesc1(&desc);
-        ASSERT(SUCCEEDED(desc_res));
+    ASSERT(physical_device_count > 0);
+    to_init->physical_device = physical_devices[0];
 
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+    VkPhysicalDeviceProperties2 physical_device_props = {};
+    physical_device_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    vkGetPhysicalDeviceProperties2(to_init->physical_device, &physical_device_props);
+    OutputDebugStringA(physical_device_props.properties.deviceName);
 
-        hardware_adapter_id = i;
-        OutputDebugStringW(desc.Description);
-        OutputDebugStringA("\n");
-        break;
-    }
+    // NOTE: Create the logical device out of the physical device.
+    // WARN: We'll just create one queue out of family zero. I believe that
+    // on most GPUs this is queue family that contains the general-purpose queue ?
+    f32 queue_priorities[] = {1.0f};
+    VkDeviceQueueCreateInfo queue_info = {};
+    queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queue_info.queueFamilyIndex = 0;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = queue_priorities;
 
-    ASSERT(hardware_adapter_id >= 0);
+    const char* device_extensions[] = {"VK_KHR_swapchain"};
 
-    HRESULT creation_res = D3D12CreateDevice(adapters[hardware_adapter_id], D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&context.device));
-    ASSERT(SUCCEEDED(creation_res));
+    VkPhysicalDeviceVulkan13Features vk_1_3_features = {};
+    vk_1_3_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vk_1_3_features.synchronization2 = VK_TRUE;
+    vk_1_3_features.dynamicRendering = VK_TRUE;
 
-    // NOTE: Create the graphics queue.
-    D3D12_COMMAND_QUEUE_DESC graphics_queue_desc = {};
-    graphics_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    HRESULT graphics_queue_res = context.device->CreateCommandQueue(&graphics_queue_desc, IID_PPV_ARGS(&context.graphics_command_queue));
-    ASSERT(SUCCEEDED(graphics_queue_res));
+    VkDeviceCreateInfo device_info = {};
+    device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_info.pNext = &vk_1_3_features;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.queueCreateInfoCount = 1;
+    device_info.ppEnabledExtensionNames = device_extensions;
+    device_info.enabledExtensionCount = ARRAY_COUNT(device_extensions);
 
-    // NOTE: Create the copy queue, and all the command stuff since
-    // this queue is global and not (yet) per-frame.
-    D3D12_COMMAND_QUEUE_DESC copy_queue_desc = {};
-    copy_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
-    HRESULT copy_queue_res = context.device->CreateCommandQueue(&copy_queue_desc, IID_PPV_ARGS(&context.copy_command_queue));
-    ASSERT(SUCCEEDED(copy_queue_res));
-    HRESULT copy_command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&context.copy_allocator));
-    ASSERT(SUCCEEDED(copy_command_allocator_res));
-    HRESULT copy_cmd_list_res = context.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, context.copy_allocator, NULL, IID_PPV_ARGS(&context.copy_command_list));
-    ASSERT(SUCCEEDED(copy_cmd_list_res));
-    HRESULT copy_close_res = context.copy_command_list->Close();
-    ASSERT(SUCCEEDED(copy_close_res));
-    HRESULT copy_fence_res = context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.copy_fence));
-    ASSERT(SUCCEEDED(copy_fence_res));
-    context.copy_fence_wait_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    VK_ASSERT(vkCreateDevice(to_init->physical_device, &device_info, nullptr, &to_init->device));
+    vkGetDeviceQueue(to_init->device, 0, 0, &to_init->queue);
+    ASSERT(to_init->queue);
 
-    // NOTE: Get the swapchain from DXGI.
-    IDXGISwapChain1* legacy_swapchain;
-    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {};
-    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapchain_desc.BufferCount = FRAMES_IN_FLIGHT;
-    swapchain_desc.SampleDesc.Count = 1;
-    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    HRESULT swapchain_res = factory->CreateSwapChainForHwnd(
-        context.graphics_command_queue,
-        window_handle,
-        &swapchain_desc,
-        NULL,
-        NULL,
-        &legacy_swapchain
-    );
-    ASSERT(SUCCEEDED(swapchain_res));
-    legacy_swapchain->QueryInterface(IID_PPV_ARGS(&context.swapchain));
+    // NOTE: Surface creation.
+    // WARNING: Getting the handles like that is error prone, but it's convenient
+    // for now.
+    to_init->window = FindWindowA("Voxel Game Window Class", nullptr);
+    VkWin32SurfaceCreateInfoKHR surface_info = {};
+    surface_info.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    surface_info.hinstance = GetModuleHandleA(NULL);
+    surface_info.hwnd = to_init->window;
+    VK_ASSERT(vkCreateWin32SurfaceKHR(to_init->instance, &surface_info, nullptr, &to_init->surface));
 
-    // NOTE: Create a descriptor heap for our render target views.
-    D3D12_DESCRIPTOR_HEAP_DESC rtv_heap_desc = {};
-    rtv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
-    rtv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    HRESULT rtv_heap_res = context.device->CreateDescriptorHeap(&rtv_heap_desc, IID_PPV_ARGS(&context.rtv_heap));
-    ASSERT(SUCCEEDED(rtv_heap_res));
-    context.rtv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    // NOTE: Swapchain creation.
+    VkSurfaceCapabilitiesKHR surface_caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(to_init->physical_device, to_init->surface, &surface_caps);
 
-    // NOTE: Fill the heap with our 2 render target views.
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_current_descriptor = context.rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        // NOTE: We first get a ID3D12Resource (handle for the actual GPU memory of the swapchain)
-        // and then create a render target view from that.
-        HRESULT swapchain_buffer_res = context.swapchain->GetBuffer(frame_idx, IID_PPV_ARGS(&context.frames[frame_idx].render_target_resource));
-        ASSERT(SUCCEEDED(swapchain_buffer_res));
+    // TODO: Support more swapchain formats, and find the "best" one to use
+    // in the swapchain creation struct.
+    u32 surface_formats_count;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(to_init->physical_device, to_init->surface, &surface_formats_count, nullptr);
+    VkSurfaceFormatKHR* surface_formats = (VkSurfaceFormatKHR*)pushBytes(scratch_arena, surface_formats_count * sizeof(VkSurfaceFormatKHR));
+    vkGetPhysicalDeviceSurfaceFormatsKHR(to_init->physical_device, to_init->surface, &surface_formats_count, surface_formats);
+    b32 found_suitable_format = false;
+    for (u32 surface_format_idx = 0; surface_format_idx < surface_formats_count; surface_format_idx++) {
+        VkSurfaceFormatKHR surface_format = surface_formats[surface_format_idx];
 
-        context.device->CreateRenderTargetView(context.frames[frame_idx].render_target_resource, NULL, rtv_current_descriptor);
-        context.frames[frame_idx].render_target_view_descriptor = rtv_current_descriptor;
-
-        rtv_current_descriptor.ptr += context.rtv_descriptor_size;
-    }
-
-    // NOTE: Kinda the same thing for depth buffers, except we need to create them since they are not managed by DXGI.
-    RECT client_rect;
-    GetClientRect(window_handle, &client_rect);
-
-    D3D12_RESOURCE_DESC depth_desc = {};
-    depth_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depth_desc.Width = client_rect.right;
-    depth_desc.Height = client_rect.bottom;
-    depth_desc.DepthOrArraySize = 1;
-    depth_desc.MipLevels = 1;
-    depth_desc.Format = DXGI_FORMAT_D32_FLOAT;
-    depth_desc.SampleDesc.Count = 1;
-    depth_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    depth_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-    D3D12_CLEAR_VALUE clear_value = {};
-    clear_value.Format = DXGI_FORMAT_D32_FLOAT;
-    clear_value.DepthStencil.Depth = 1.0f;
-    clear_value.DepthStencil.Stencil = 0;
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        D3D12_HEAP_PROPERTIES depth_heap_props = {};
-        depth_heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
-        depth_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        depth_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        depth_heap_props.CreationNodeMask = 1;
-        depth_heap_props.VisibleNodeMask = 1;
-
-        HRESULT heap_creation_result = context.device->CreateCommittedResource(
-            &depth_heap_props,
-            D3D12_HEAP_FLAG_NONE,
-            &depth_desc,
-            D3D12_RESOURCE_STATE_DEPTH_WRITE,
-            &clear_value,
-            IID_PPV_ARGS(&context.frames[frame_idx].depth_target_resource)
-        );
-        ASSERT(SUCCEEDED(heap_creation_result));
-    }
-
-    // NOTE: Create a descriptor heap for our depth/stencil views.
-    D3D12_DESCRIPTOR_HEAP_DESC dsv_heap_desc = {};
-    dsv_heap_desc.NumDescriptors = FRAMES_IN_FLIGHT;
-    dsv_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsv_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    HRESULT dsv_heap_res = context.device->CreateDescriptorHeap(&dsv_heap_desc, IID_PPV_ARGS(&context.dsv_heap));
-    ASSERT(SUCCEEDED(dsv_heap_res));
-    context.dsv_descriptor_size = context.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
-    // NOTE: Fill the descriptor heap with our 2 depth buffer views.
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_heap_current_descriptor = context.dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
-        dsv_desc.Format = DXGI_FORMAT_D32_FLOAT;
-        dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
-
-        context.device->CreateDepthStencilView(context.frames[frame_idx].depth_target_resource, &dsv_desc, dsv_heap_current_descriptor);
-        context.frames[frame_idx].depth_target_view_descriptor = dsv_heap_current_descriptor;
-
-        dsv_heap_current_descriptor.ptr += context.dsv_descriptor_size;
-    }
-
-    // NOTE: For each frame in flight, create a command allocator, list, and a fence to wait on.
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT command_allocator_res = context.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&context.frames[frame_idx].command_allocator));
-        ASSERT(SUCCEEDED(command_allocator_res));
-    }
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT cmd_list_res = context.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, context.frames[frame_idx].command_allocator, NULL, IID_PPV_ARGS(&context.frames[frame_idx].command_list));
-        ASSERT(SUCCEEDED(cmd_list_res));
-        HRESULT close_res = context.frames[frame_idx].command_list->Close();
-        ASSERT(SUCCEEDED(close_res));
-    }
-
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        HRESULT fence_res = context.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&context.frames[frame_idx].fence));
-        ASSERT(SUCCEEDED(fence_res));
-
-        context.frames[frame_idx].fence_wait_event = CreateEventA(NULL, FALSE, FALSE, NULL);
-    }
-
-    // NOTE: Update the current frame index.
-    context.current_frame_idx = context.swapchain->GetCurrentBackBufferIndex();
-
-    return context;
-}
-
-// TODO: This should handle errors gracefully. Maybe a default shader enbedded in the exe ?
-void readAndCompileShaders(const char* path, ID3DBlob** vertex_shader, ID3DBlob** fragment_shader) {
-
-    // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
-    wchar_t windows_path[128];
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, windows_path, ARRAY_COUNT(windows_path));
-
-    ID3DBlob* vertex_shader_compilation_err;
-    HRESULT vertex_shader_err = D3DCompileFromFile(windows_path, NULL, NULL, "VSMain", "vs_5_0", 0, 0, vertex_shader, &vertex_shader_compilation_err);
-    if (vertex_shader_compilation_err) {
-        OutputDebugStringA((char*)vertex_shader_compilation_err->GetBufferPointer());
-    }
-    ASSERT(SUCCEEDED(vertex_shader_err));
-
-    ID3DBlob* fragment_shader_compilation_err;
-    HRESULT fragment_shader_err = D3DCompileFromFile(windows_path, NULL, NULL, "PSMain", "ps_5_0", 0, 0, fragment_shader, &fragment_shader_compilation_err);
-    if (fragment_shader_compilation_err) {
-        OutputDebugStringA((char*)fragment_shader_compilation_err->GetBufferPointer());
-    }
-    ASSERT(SUCCEEDED(fragment_shader_err));
-}
-
-void createChunkRenderPipelines(D3DContext* d3d_context, D3DPipeline* chunk_pipeline, D3DPipeline* wireframe_pipeline) {
-        ID3DBlob* chunk_vertex_shader;
-        ID3DBlob* chunk_fragment_shader;
-        readAndCompileShaders("./shaders/debug_chunk.hlsl", &chunk_vertex_shader, &chunk_fragment_shader);
-
-        ID3DBlob* wireframe_vertex_shader;
-        ID3DBlob* wireframe_fragment_shader;
-        readAndCompileShaders("./shaders/solid_color.hlsl", &wireframe_vertex_shader, &wireframe_fragment_shader);
-
-        // NOTE: Root signature with 2 constants :
-        // - Model matrix
-        // - Fused perspective * view matrix
-        D3D12_ROOT_PARAMETER chunk_root_parameters[2];
-        chunk_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        chunk_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        chunk_root_parameters[0].Constants.Num32BitValues = 16;
-        chunk_root_parameters[0].Constants.ShaderRegister = 0;
-        chunk_root_parameters[0].Constants.RegisterSpace = 0;
-        chunk_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        chunk_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        chunk_root_parameters[1].Constants.Num32BitValues = 16;
-        chunk_root_parameters[1].Constants.ShaderRegister = 1;
-        chunk_root_parameters[1].Constants.RegisterSpace = 0;
-
-        D3D12_ROOT_SIGNATURE_DESC chunk_root_signature_desc = {};
-        chunk_root_signature_desc.NumParameters = ARRAY_COUNT(chunk_root_parameters);
-        chunk_root_signature_desc.pParameters = chunk_root_parameters;
-        chunk_root_signature_desc.NumStaticSamplers = 0;
-        chunk_root_signature_desc.pStaticSamplers = NULL;
-        chunk_root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-        ID3DBlob* chunk_serialized_signature;
-        ID3DBlob* chunk_serialize_err;
-        D3D12SerializeRootSignature(&chunk_root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &chunk_serialized_signature, &chunk_serialize_err);
-        if (chunk_serialize_err) {
-            OutputDebugStringA((char*)chunk_serialize_err->GetBufferPointer());
+        if (surface_format.format == VK_FORMAT_B8G8R8A8_SRGB && surface_format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            found_suitable_format = true;
+            break;
         }
-        ASSERT(chunk_serialize_err == NULL);
-        HRESULT chunk_signature_res = d3d_context->device->CreateRootSignature(0, chunk_serialized_signature->GetBufferPointer(), chunk_serialized_signature->GetBufferSize(), IID_PPV_ARGS(&chunk_pipeline->root_signature));
-        ASSERT(SUCCEEDED(chunk_signature_res));
+    }
+    ASSERT(found_suitable_format);
 
-        // NOTE: Root signature with 3 constants :
-        // - Model matrix
-        // - Fused perspective * view matrix
-        // - Wireframe color
-        D3D12_ROOT_PARAMETER wireframe_root_parameters[3];
-        wireframe_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        wireframe_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        wireframe_root_parameters[0].Constants.Num32BitValues = 16;
-        wireframe_root_parameters[0].Constants.ShaderRegister = 0;
-        wireframe_root_parameters[0].Constants.RegisterSpace = 0;
-        wireframe_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        wireframe_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        wireframe_root_parameters[1].Constants.Num32BitValues = 16;
-        wireframe_root_parameters[1].Constants.ShaderRegister = 1;
-        wireframe_root_parameters[1].Constants.RegisterSpace = 0;
-        wireframe_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        wireframe_root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        wireframe_root_parameters[2].Constants.Num32BitValues = 4;
-        wireframe_root_parameters[2].Constants.ShaderRegister = 2;
-        wireframe_root_parameters[2].Constants.RegisterSpace = 0;
+    // TODO: Support more presentation modes ? Vsync is fine for now but
+    // maybe it would be better to run in Mailbox and handle the frame pacing
+    // outselves. Apparently my Intel B580 doesn't even have mailbox, so that
+    // makes it easier to decide.
+    u32 present_modes_count;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(to_init->physical_device, to_init->surface, &present_modes_count, nullptr);
+    VkPresentModeKHR* present_modes = (VkPresentModeKHR*)pushBytes(scratch_arena, present_modes_count * sizeof(VkPresentModeKHR));
+    vkGetPhysicalDeviceSurfacePresentModesKHR(to_init->physical_device, to_init->surface, &present_modes_count, present_modes);
+    b32 found_suitable_present_mode = false;
+    for (u32 present_mode_idx = 0; present_mode_idx < present_modes_count; present_mode_idx++) {
+        VkPresentModeKHR present_mode = present_modes[present_mode_idx];
 
-        D3D12_ROOT_SIGNATURE_DESC wireframe_root_signature_desc = {};
-        wireframe_root_signature_desc.NumParameters = ARRAY_COUNT(wireframe_root_parameters);
-        wireframe_root_signature_desc.pParameters = wireframe_root_parameters;
-        wireframe_root_signature_desc.NumStaticSamplers = 0;
-        wireframe_root_signature_desc.pStaticSamplers = NULL;
-        wireframe_root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-        ID3DBlob* wireframe_serialized_signature;
-        ID3DBlob* wireframe_serialize_err;
-        D3D12SerializeRootSignature(&wireframe_root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &wireframe_serialized_signature, &wireframe_serialize_err);
-        if (wireframe_serialize_err) {
-            OutputDebugStringA((char*)wireframe_serialize_err->GetBufferPointer());
+        if (present_mode == VK_PRESENT_MODE_FIFO_KHR) {
+            found_suitable_present_mode = true;
+            break;
         }
-        ASSERT(wireframe_serialize_err == NULL);
-        HRESULT wireframe_signature_res = d3d_context->device->CreateRootSignature(0, wireframe_serialized_signature->GetBufferPointer(), wireframe_serialized_signature->GetBufferSize(), IID_PPV_ARGS(&wireframe_pipeline->root_signature));
-        ASSERT(SUCCEEDED(wireframe_signature_res));
+    }
+    ASSERT(found_suitable_present_mode);
 
-        // NOTE: The normal render pipeline and the wireframe pipeline use the same
-        // vertex buffers, so the same input stage config.
-        D3D12_INPUT_ELEMENT_DESC shared_input_descriptions[2];
-        shared_input_descriptions[0].SemanticName = "POSITION";
-        shared_input_descriptions[0].SemanticIndex = 0;
-        shared_input_descriptions[0].Format = DXGI_FORMAT_R32G32B32_FLOAT;
-        shared_input_descriptions[0].InputSlot = 0;
-        shared_input_descriptions[0].AlignedByteOffset = 0;
-        shared_input_descriptions[0].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-        shared_input_descriptions[0].InstanceDataStepRate = 0;
+    // TODO: Vulkan-Tutorial says: "However, simply sticking to this minimum means
+    // that we may sometimes have to wait on the driver to complete internal operations
+    // before we can acquire another image to render to. Therefore it is recommended
+    // to request at least one more image than the minimum."
+    // Should we use 3 framebuffers ?
+    ASSERT(surface_caps.minImageCount <= FRAMES_IN_FLIGHT && (surface_caps.maxImageCount >= FRAMES_IN_FLIGHT || surface_caps.maxImageCount == 0));
 
-        shared_input_descriptions[1].SemanticName = "NORMAL";
-        shared_input_descriptions[1].SemanticIndex = 0;
-        shared_input_descriptions[1].Format = DXGI_FORMAT_R32G32B32_FLOAT;
-        shared_input_descriptions[1].InputSlot = 0;
-        shared_input_descriptions[1].AlignedByteOffset = 3 * sizeof(f32);
-        shared_input_descriptions[1].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-        shared_input_descriptions[1].InstanceDataStepRate = 0;
+    VkSwapchainCreateInfoKHR swapchain_create_info = {};
+    swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchain_create_info.surface = to_init->surface;
+    swapchain_create_info.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+    swapchain_create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swapchain_create_info.minImageCount = FRAMES_IN_FLIGHT;
+    swapchain_create_info.imageExtent = surface_caps.currentExtent;
+    swapchain_create_info.imageArrayLayers = 1;
+    swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapchain_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    swapchain_create_info.preTransform = surface_caps.currentTransform;
+    swapchain_create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    swapchain_create_info.clipped = VK_TRUE;
+    swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
+    VK_ASSERT(vkCreateSwapchainKHR(to_init->device, &swapchain_create_info, nullptr, &to_init->swapchain));
 
-        D3D12_RASTERIZER_DESC chunk_rasterizer_desc = {};
-        chunk_rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
-        chunk_rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
-        chunk_rasterizer_desc.FrontCounterClockwise = true;
-        chunk_rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
-        chunk_rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
-        chunk_rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
-        chunk_rasterizer_desc.DepthClipEnable = TRUE;
-        chunk_rasterizer_desc.MultisampleEnable = FALSE;
-        chunk_rasterizer_desc.AntialiasedLineEnable = FALSE;
-        chunk_rasterizer_desc.ForcedSampleCount = 0;
-        chunk_rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    u32 swapchain_images_count;
+    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, nullptr);
+    // FIXME: Apparently the driver is allowed to create more images than what we asked for. We should
+    // support that eventually.
+    ASSERT(swapchain_images_count == FRAMES_IN_FLIGHT);
+    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, to_init->swapchain_images);
 
-        D3D12_RASTERIZER_DESC wireframe_rasterizer_desc = {};
-        wireframe_rasterizer_desc.FillMode = D3D12_FILL_MODE_WIREFRAME;
-        wireframe_rasterizer_desc.CullMode = D3D12_CULL_MODE_NONE;
-        wireframe_rasterizer_desc.FrontCounterClockwise = true;
-        wireframe_rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
-        wireframe_rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
-        wireframe_rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
-        wireframe_rasterizer_desc.DepthClipEnable = TRUE;
-        wireframe_rasterizer_desc.MultisampleEnable = FALSE;
-        wireframe_rasterizer_desc.AntialiasedLineEnable = FALSE;
-        wireframe_rasterizer_desc.ForcedSampleCount = 0;
-        wireframe_rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-
-        D3D12_BLEND_DESC shared_blend_desc = {};
-        shared_blend_desc.AlphaToCoverageEnable = FALSE;
-        shared_blend_desc.IndependentBlendEnable = FALSE;
-        shared_blend_desc.RenderTarget[0].BlendEnable = FALSE;
-        shared_blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
-        shared_blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        shared_blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        shared_blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        shared_blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        shared_blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        shared_blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        shared_blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
-        shared_blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-
-        D3D12_DEPTH_STENCIL_DESC shared_depth_desc = {};
-        shared_depth_desc.DepthEnable = TRUE;
-        shared_depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        shared_depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        shared_depth_desc.StencilEnable = FALSE;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC chunk_pipeline_desc = {};
-        chunk_pipeline_desc.InputLayout.pInputElementDescs = shared_input_descriptions;
-        chunk_pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(shared_input_descriptions);
-        chunk_pipeline_desc.pRootSignature = chunk_pipeline->root_signature;
-        chunk_pipeline_desc.VS.pShaderBytecode = chunk_vertex_shader->GetBufferPointer();
-        chunk_pipeline_desc.VS.BytecodeLength = chunk_vertex_shader->GetBufferSize();
-        chunk_pipeline_desc.PS.pShaderBytecode = chunk_fragment_shader->GetBufferPointer();
-        chunk_pipeline_desc.PS.BytecodeLength = chunk_fragment_shader->GetBufferSize();
-        chunk_pipeline_desc.RasterizerState = chunk_rasterizer_desc;
-        chunk_pipeline_desc.BlendState = shared_blend_desc;
-        chunk_pipeline_desc.DepthStencilState = shared_depth_desc;
-        chunk_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        chunk_pipeline_desc.SampleMask = UINT_MAX;
-        chunk_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        chunk_pipeline_desc.NumRenderTargets = 1;
-        chunk_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        chunk_pipeline_desc.SampleDesc.Count = 1;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC wireframe_pipeline_desc = {};
-        wireframe_pipeline_desc.InputLayout.pInputElementDescs = shared_input_descriptions;
-        wireframe_pipeline_desc.InputLayout.NumElements = ARRAY_COUNT(shared_input_descriptions);
-        wireframe_pipeline_desc.pRootSignature = wireframe_pipeline->root_signature;
-        wireframe_pipeline_desc.VS.pShaderBytecode = wireframe_vertex_shader->GetBufferPointer();
-        wireframe_pipeline_desc.VS.BytecodeLength = wireframe_vertex_shader->GetBufferSize();
-        wireframe_pipeline_desc.PS.pShaderBytecode = wireframe_fragment_shader->GetBufferPointer();
-        wireframe_pipeline_desc.PS.BytecodeLength = wireframe_fragment_shader->GetBufferSize();
-        wireframe_pipeline_desc.RasterizerState = wireframe_rasterizer_desc;
-        wireframe_pipeline_desc.BlendState = shared_blend_desc;
-        wireframe_pipeline_desc.DepthStencilState = shared_depth_desc;
-        wireframe_pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        wireframe_pipeline_desc.SampleMask = UINT_MAX;
-        wireframe_pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        wireframe_pipeline_desc.NumRenderTargets = 1;
-        wireframe_pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        wireframe_pipeline_desc.SampleDesc.Count = 1;
-
-        HRESULT chunk_pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&chunk_pipeline_desc, IID_PPV_ARGS(&chunk_pipeline->pipeline_state));
-        ASSERT(SUCCEEDED(chunk_pipeline_res));
-        HRESULT wireframe_pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&wireframe_pipeline_desc, IID_PPV_ARGS(&wireframe_pipeline->pipeline_state));
-        ASSERT(SUCCEEDED(wireframe_pipeline_res));
-
-        chunk_vertex_shader->Release();
-        chunk_fragment_shader->Release();
-        wireframe_vertex_shader->Release();
-        wireframe_fragment_shader->Release();
-
-        chunk_serialized_signature->Release();
-        wireframe_serialized_signature->Release();
-}
-
-void blockingUploadToGPUBuffer(D3DContext* d3d_context, ID3D12Resource* src_buffer, ID3D12Resource* dst_buffer, usize size) {
-    // NOTE: Wait for the previous upload to have completed.
-    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
-        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
-        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        VkImageViewCreateInfo swapchain_view_info = {};
+        swapchain_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        swapchain_view_info.image = to_init->swapchain_images[frame_idx];
+        swapchain_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        swapchain_view_info.format = VK_FORMAT_B8G8R8A8_SRGB;
+        swapchain_view_info.subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        };
+        vkCreateImageView(to_init->device, &swapchain_view_info, nullptr, &to_init->swapchain_images_views[frame_idx]);
     }
 
-    // NOTE: Prepare the command buffer for recording.
-    HRESULT alloc_reset = d3d_context->copy_allocator->Reset();
-    ASSERT(SUCCEEDED(alloc_reset));
-    HRESULT cmd_reset = d3d_context->copy_command_list->Reset(d3d_context->copy_allocator, NULL);
-    ASSERT(SUCCEEDED(cmd_reset));
+    // NOTE: Create the command pool and buffers used by our frames.
+    VkCommandPoolCreateInfo pool_info = {};
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.pNext = nullptr;
+    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pool_info.queueFamilyIndex = 0;
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        VK_ASSERT(vkCreateCommandPool(to_init->device, &pool_info, nullptr, &to_init->frames[frame_idx].cmd_pool));
 
-    // NOTE: Signal to the driver that the destination buffer needs to be in a copy-ready state.
-    D3D12_RESOURCE_BARRIER to_copy_dst_barrier = {};
-    to_copy_dst_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    to_copy_dst_barrier.Transition.pResource = dst_buffer;
-    to_copy_dst_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    to_copy_dst_barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
-    to_copy_dst_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    d3d_context->copy_command_list->ResourceBarrier(1, &to_copy_dst_barrier);
-
-    // NOTE: This is the actual copy command.
-    d3d_context->copy_command_list->CopyBufferRegion(dst_buffer, 0, src_buffer, 0, size);
-
-    // NOTE: Close the command buffer and send it to the GPU for execution.
-    HRESULT close_res = d3d_context->copy_command_list->Close();
-    ASSERT(SUCCEEDED(close_res));
-    d3d_context->copy_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&d3d_context->copy_command_list);
-
-    // NOTE: Signal the copy fence once all commands on the copy queues have been executed.
-    d3d_context->copy_command_queue->Signal(d3d_context->copy_fence, ++d3d_context->copy_fence_ready_value);
-
-    // NOTE: Wait for the upload to have completed. This makes waiting at the beginning of the function technically
-    // redundant, but eh.
-    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
-        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
-        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
-    }
-}
-
-// FIXME: This only works if the texture is already in the copy_dst state. I need to handle GPU uploads better.
-void blockingTextureUpload(D3DContext* d3d_context, ID3D12Resource* src_buffer, ID3D12Resource* dst_texture, u32 width, u32 height) {
-    // NOTE: Wait for the previous upload to have completed.
-    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
-        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
-        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+        VkCommandBufferAllocateInfo cmd_buffer_info = {};
+        cmd_buffer_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmd_buffer_info.commandPool = to_init->frames[frame_idx].cmd_pool;
+        cmd_buffer_info.commandBufferCount = 1;
+        cmd_buffer_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        VK_ASSERT(vkAllocateCommandBuffers(to_init->device, &cmd_buffer_info, &to_init->frames[frame_idx].cmd_buffer));
     }
 
-    // NOTE: Prepare the command buffer for recording.
-    HRESULT alloc_reset = d3d_context->copy_allocator->Reset();
-    ASSERT(SUCCEEDED(alloc_reset));
-    HRESULT cmd_reset = d3d_context->copy_command_list->Reset(d3d_context->copy_allocator, NULL);
-    ASSERT(SUCCEEDED(cmd_reset));
+    // NOTE: ... And the synchronization primitives.
+    VkSemaphoreCreateInfo semaphore_info = {};
+    semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-    // NOTE: Source and dest texture info.
-    D3D12_TEXTURE_COPY_LOCATION dst_location = {};
-    dst_location.pResource = dst_texture;
-    dst_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst_location.SubresourceIndex = 0;
+    VkFenceCreateInfo fence_info = {};
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    D3D12_TEXTURE_COPY_LOCATION src_location = {};
-    src_location.pResource = src_buffer;
-    src_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src_location.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    src_location.PlacedFootprint.Footprint.Width = width;
-    src_location.PlacedFootprint.Footprint.Height = height;
-    src_location.PlacedFootprint.Footprint.Depth = 1;
-    src_location.PlacedFootprint.Footprint.RowPitch = width * 4;
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        VK_ASSERT(vkCreateFence(to_init->device, &fence_info, nullptr, &to_init->frames[frame_idx].render_fence));
 
-    // NOTE: This is the actual copy command.
-    d3d_context->copy_command_list->CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, NULL);
-
-    // NOTE: Close the command buffer and send it to the GPU for execution.
-    HRESULT close_res = d3d_context->copy_command_list->Close();
-    ASSERT(SUCCEEDED(close_res));
-    d3d_context->copy_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&d3d_context->copy_command_list);
-
-    // NOTE: Signal the copy fence once all commands on the copy queues have been executed.
-    d3d_context->copy_command_queue->Signal(d3d_context->copy_fence, ++d3d_context->copy_fence_ready_value);
-
-    // NOTE: Wait for the upload to have completed. This makes waiting at the beginning of the function technically
-    // redundant, but eh.
-    if (d3d_context->copy_fence->GetCompletedValue() < d3d_context->copy_fence_ready_value) {
-        d3d_context->copy_fence->SetEventOnCompletion(d3d_context->copy_fence_ready_value, d3d_context->copy_fence_wait_event);
-        WaitForSingleObject(d3d_context->copy_fence_wait_event, INFINITE);
+        VK_ASSERT(vkCreateSemaphore(to_init->device, &semaphore_info, nullptr, &to_init->frames[frame_idx].swapchain_semaphore));
+        VK_ASSERT(vkCreateSemaphore(to_init->device, &semaphore_info, nullptr, &to_init->frames[frame_idx].render_semaphore));
     }
-}
 
-struct TextRenderer {
-    D3DPipeline render_pipeline;
-    ID3D12Resource* font_texture_buffer;
-    ID3D12DescriptorHeap* font_texture_descriptor_heap;
-    D3D12_CPU_DESCRIPTOR_HANDLE font_texture_descriptor;
-    b32 texture_ready;
-};
-
-void initializeTextRendering(D3DContext* d3d_context, TextRenderer* to_init, Arena* scratch) {
-        // NOTE: Create the pipeline.
-        ID3DBlob* text_vertex_shader;
-        ID3DBlob* text_fragment_shader;
-        readAndCompileShaders("./shaders/bitmap_text.hlsl", &text_vertex_shader, &text_fragment_shader);
-
-        // NOTE: Root signature with 1 descriptor table containing the
-        // bitmap font descriptor, a transform matrix and the ascii code.
-        D3D12_DESCRIPTOR_RANGE range;
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors = 1;
-        range.BaseShaderRegister = 0;
-        range.RegisterSpace = 0;
-        range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-        D3D12_ROOT_PARAMETER text_pipeline_root_parameters[3];
-        text_pipeline_root_parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        text_pipeline_root_parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        text_pipeline_root_parameters[0].DescriptorTable.NumDescriptorRanges = 1;
-        text_pipeline_root_parameters[0].DescriptorTable.pDescriptorRanges = &range;
-
-        text_pipeline_root_parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        text_pipeline_root_parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        text_pipeline_root_parameters[1].Constants.Num32BitValues = 16;
-        text_pipeline_root_parameters[1].Constants.ShaderRegister = 0;
-        text_pipeline_root_parameters[1].Constants.RegisterSpace = 0;
-
-        text_pipeline_root_parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        text_pipeline_root_parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-        text_pipeline_root_parameters[2].Constants.Num32BitValues = 1;
-        text_pipeline_root_parameters[2].Constants.ShaderRegister = 1;
-        text_pipeline_root_parameters[2].Constants.RegisterSpace = 0;
-
-        D3D12_STATIC_SAMPLER_DESC sampler_desc = {};
-        sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-        sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler_desc.MipLODBias = 0;
-        sampler_desc.MaxAnisotropy = 1;
-        sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-        sampler_desc.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
-        sampler_desc.MinLOD = 0;
-        sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
-        sampler_desc.ShaderRegister = 0;
-        sampler_desc.RegisterSpace = 0;
-        sampler_desc.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-
-        D3D12_ROOT_SIGNATURE_DESC root_signature_desc = {};
-        root_signature_desc.NumParameters = ARRAY_COUNT(text_pipeline_root_parameters);
-        root_signature_desc.pParameters = text_pipeline_root_parameters;
-        root_signature_desc.NumStaticSamplers = 1;
-        root_signature_desc.pStaticSamplers = &sampler_desc;
-        root_signature_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-        ID3DBlob* serialized_signature;
-        ID3DBlob* serialize_err;
-        HRESULT serialize_res = D3D12SerializeRootSignature(&root_signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized_signature, &serialize_err);
-        if (serialize_err) {
-            OutputDebugStringA((char*)serialize_err->GetBufferPointer());
-        }
-        ASSERT(SUCCEEDED(serialize_res));
-        ASSERT(serialize_err == NULL);
-        HRESULT signature_res = d3d_context->device->CreateRootSignature(0, serialized_signature->GetBufferPointer(), serialized_signature->GetBufferSize(), IID_PPV_ARGS(&to_init->render_pipeline.root_signature));
-        ASSERT(SUCCEEDED(signature_res));
-
-        D3D12_RASTERIZER_DESC rasterizer_desc = {};
-        rasterizer_desc.FillMode = D3D12_FILL_MODE_SOLID;
-        rasterizer_desc.CullMode = D3D12_CULL_MODE_BACK;
-        rasterizer_desc.FrontCounterClockwise = true;
-        rasterizer_desc.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
-        rasterizer_desc.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
-        rasterizer_desc.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
-        rasterizer_desc.DepthClipEnable = TRUE;
-        rasterizer_desc.MultisampleEnable = FALSE;
-        rasterizer_desc.AntialiasedLineEnable = FALSE;
-        rasterizer_desc.ForcedSampleCount = 0;
-        rasterizer_desc.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-
-        D3D12_BLEND_DESC blend_desc = {};
-        blend_desc.AlphaToCoverageEnable = FALSE;
-        blend_desc.IndependentBlendEnable = FALSE;
-        blend_desc.RenderTarget[0].BlendEnable = TRUE;
-        blend_desc.RenderTarget[0].LogicOpEnable = FALSE;
-        blend_desc.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-        blend_desc.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        blend_desc.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        blend_desc.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        blend_desc.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        blend_desc.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        blend_desc.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
-        blend_desc.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-
-        D3D12_DEPTH_STENCIL_DESC depth_desc = {};
-        depth_desc.DepthEnable = FALSE;
-        depth_desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        depth_desc.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        depth_desc.StencilEnable = FALSE;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc = {};
-        pipeline_desc.InputLayout.pInputElementDescs = NULL;
-        pipeline_desc.InputLayout.NumElements = 0;
-        pipeline_desc.pRootSignature = to_init->render_pipeline.root_signature;
-        pipeline_desc.VS.pShaderBytecode = text_vertex_shader->GetBufferPointer();
-        pipeline_desc.VS.BytecodeLength = text_vertex_shader->GetBufferSize();
-        pipeline_desc.PS.pShaderBytecode = text_fragment_shader->GetBufferPointer();
-        pipeline_desc.PS.BytecodeLength = text_fragment_shader->GetBufferSize();
-        pipeline_desc.RasterizerState = rasterizer_desc;
-        pipeline_desc.BlendState = blend_desc;
-        pipeline_desc.DepthStencilState = depth_desc;
-        pipeline_desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        pipeline_desc.SampleMask = UINT_MAX;
-        pipeline_desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        pipeline_desc.NumRenderTargets = 1;
-        pipeline_desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        pipeline_desc.SampleDesc.Count = 1;
-
-        HRESULT pipeline_res = d3d_context->device->CreateGraphicsPipelineState(&pipeline_desc, IID_PPV_ARGS(&to_init->render_pipeline.pipeline_state));
-        ASSERT(SUCCEEDED(pipeline_res));
-
-        text_vertex_shader->Release();
-        text_fragment_shader->Release();
-        serialized_signature->Release();
-
-        // NOTE: Upload the texture and create the related objects.
-        // - Texture buffer
-        // - Upload buffer (released at the end of the function)
-        // - Descriptor heap
-        // - Texture descriptor inside
-        u32 bitmap_width, bitmap_height;
-        u8* bitmap_font = read_image(".\\assets\\monogram-bitmap.png", &bitmap_width, &bitmap_height, scratch, scratch);
-
-        D3D12_HEAP_PROPERTIES heap_props = {};
-        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
-        heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        heap_props.CreationNodeMask = 1;
-        heap_props.VisibleNodeMask = 1;
-
-        D3D12_RESOURCE_DESC texture_buffer_resource_desc = {};
-        texture_buffer_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        texture_buffer_resource_desc.Alignment = 0;
-        texture_buffer_resource_desc.Width = bitmap_width;
-        texture_buffer_resource_desc.Height = bitmap_height;
-        texture_buffer_resource_desc.DepthOrArraySize = 1;
-        texture_buffer_resource_desc.MipLevels = 1;
-        texture_buffer_resource_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        texture_buffer_resource_desc.SampleDesc.Count = 1;
-        texture_buffer_resource_desc.SampleDesc.Quality = 0;
-        texture_buffer_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        texture_buffer_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-        HRESULT texture_buffer_creation_res = d3d_context->device->CreateCommittedResource(
-            &heap_props,
-            D3D12_HEAP_FLAG_NONE,
-            &texture_buffer_resource_desc,
-            D3D12_RESOURCE_STATE_COMMON,
-            NULL,
-            IID_PPV_ARGS(&to_init->font_texture_buffer)
-        );
-        ASSERT(SUCCEEDED(texture_buffer_creation_res));
-
-        D3D12_HEAP_PROPERTIES upload_heap_props = {};
-        upload_heap_props.Type = D3D12_HEAP_TYPE_UPLOAD; // DEFAULT = VRAM | UPLOAD / READBACK = RAM
-        upload_heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
-        upload_heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
-        upload_heap_props.CreationNodeMask = 1;
-        upload_heap_props.VisibleNodeMask = 1;
-
-        D3D12_RESOURCE_DESC upload_heap_resource_desc = {};
-        upload_heap_resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        upload_heap_resource_desc.Alignment = 0;
-        upload_heap_resource_desc.Width = bitmap_width * bitmap_height * 4; // This is the only field that really matters.
-        upload_heap_resource_desc.Height = 1;
-        upload_heap_resource_desc.DepthOrArraySize = 1;
-        upload_heap_resource_desc.MipLevels = 1;
-        upload_heap_resource_desc.Format = DXGI_FORMAT_UNKNOWN;
-        upload_heap_resource_desc.SampleDesc.Count = 1;
-        upload_heap_resource_desc.SampleDesc.Quality = 0;
-        upload_heap_resource_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        upload_heap_resource_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-        ID3D12Resource* upload_buffer;
-        HRESULT upload_buffer_creation_res = d3d_context->device->CreateCommittedResource(
-            &upload_heap_props,
-            D3D12_HEAP_FLAG_NONE,
-            &upload_heap_resource_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, // this is from the GPU's perspective
-            NULL,
-            IID_PPV_ARGS(&upload_buffer)
-        );
-        ASSERT(SUCCEEDED(upload_buffer_creation_res));
-
-        D3D12_RANGE read_range = {};
-        u8* mapped_upload_buffer;
-        upload_buffer->Map(0, &read_range, (void**)&mapped_upload_buffer);
-
-        for (int i = 0; i < bitmap_width * bitmap_height * 4; i++) {
-            mapped_upload_buffer[i] = bitmap_font[i];
-        }
-
-        upload_buffer->Unmap(0, NULL);
-
-        blockingTextureUpload(d3d_context, upload_buffer, to_init->font_texture_buffer, bitmap_width, bitmap_height);
-        to_init->texture_ready = false;
-        upload_buffer->Release();
-
-        D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
-        heapDesc.NumDescriptors = 1;
-        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE; // Important!
-
-        HRESULT descriptor_heap_res = d3d_context->device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&to_init->font_texture_descriptor_heap));
-        ASSERT(SUCCEEDED(descriptor_heap_res));
-        // u32 srv_descriptor_size = d3d_context->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Format = texture_buffer_resource_desc.Format;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        D3D12_CPU_DESCRIPTOR_HANDLE srv_handle = to_init->font_texture_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-
-        d3d_context->device->CreateShaderResourceView(to_init->font_texture_buffer, &srvDesc, srv_handle);
+    return true;
 }
 
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
@@ -1019,6 +464,8 @@ b32 raycast_chunk_traversal(Chunk* chunk, v3 traversal_origin, v3 traversal_dire
     return false;
 }
 
+/*
+
 void refreshChunk(D3DContext* d3d_context, Chunk* chunk) {
 
     // NOTE: generate directly in the mapped upload buffer
@@ -1130,12 +577,14 @@ void drawDebugTextOnScreen(TextRenderer* text_renderer, ID3D12GraphicsCommandLis
     }
 }
 
+*/
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
     SimplexTable* simplex_table;
 
-    D3DContext d3d_context;
+    VulkanContext vk_context;
 
     f32 camera_pitch;
     f32 camera_yaw;
@@ -1146,10 +595,10 @@ struct GameState {
     ChunkMemoryPool chunk_pool;
     WorldHashMap world;
 
-    D3DPipeline chunk_render_pipeline;
-    D3DPipeline wireframe_render_pipeline;
+    //D3DPipeline chunk_render_pipeline;
+    //D3DPipeline wireframe_render_pipeline;
 
-    TextRenderer text_renderer;
+    //TextRenderer text_renderer;
 
     b32 is_wireframe;
 
@@ -1173,9 +622,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->frame_arena.base = game_state->frame_arena_memory;
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
-        game_state->d3d_context = initializeD3D12(true);
+        ASSERT(initializeVulkan(&game_state->vk_context, true, &game_state->frame_arena));
 
-        initChunkMemoryPool(&game_state->chunk_pool, game_state->d3d_context.device);
+        //initChunkMemoryPool(&game_state->chunk_pool, game_state->d3d_context.device);
         game_state->world.nb_occupied = 0;
 
         game_state->player_position = {110, 40, 110};
@@ -1186,9 +635,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         game_state->simplex_table = simplex_table_from_seed(0xC0FFEE, &game_state->static_arena);
 
-        createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
+        //createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
 
-        initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
+        //initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
 
         memory->is_initialized = true;
     }
@@ -1254,6 +703,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->orbit_mode = !game_state->orbit_mode;
     }
 
+    /*
     // FIXME: The code for destroying the block the player is looking at is pretty convoluted.
     // There has to be a better way, maybe recursive ? But that has drawbacks too.
     if (input->kb.keys[SCANCODE_SPACE].is_down || input->ctrl.a.is_down) {
@@ -1410,36 +860,160 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         }
     }
 
+    */
+
     // RENDERING
 
-    // NOTE: Wait for the render commands sent the last time we used that backbuffer have
-    // been completed, by sleeping until its value gets updated by the signal command we enqueued last time.
-    D3DFrameContext* current_frame = &game_state->d3d_context.frames[game_state->d3d_context.current_frame_idx];
-    if(current_frame->fence->GetCompletedValue() < current_frame->fence_ready_value) {
-        current_frame->fence->SetEventOnCompletion(current_frame->fence_ready_value, current_frame->fence_wait_event);
-        WaitForSingleObject(current_frame->fence_wait_event, INFINITE);
-    }
+    // NOTE: Wait until the work previously submitted by the frame is done.
+    FrameContext& current_frame = game_state->vk_context.frames[game_state->vk_context.frames_counter % FRAMES_IN_FLIGHT];
+    VK_ASSERT(vkWaitForFences(game_state->vk_context.device, 1, &current_frame.render_fence, true, ONE_SECOND_TIMEOUT));
+    VK_ASSERT(vkResetFences(game_state->vk_context.device, 1, &current_frame.render_fence));
 
-    // NOTE: Reset the frame's command allocator and list, now that they are no longer in use.
-    HRESULT alloc_reset = current_frame->command_allocator->Reset();
-    ASSERT(SUCCEEDED(alloc_reset));
-    HRESULT cmd_reset = current_frame->command_list->Reset(current_frame->command_allocator, NULL);
-    ASSERT(SUCCEEDED(cmd_reset));
+    // NOTE: Request an image from the swapchain that we can use for rendering.
+    u32 swapchain_img_idx;
+    VK_ASSERT(vkAcquireNextImageKHR(game_state->vk_context.device, game_state->vk_context.swapchain, ONE_SECOND_TIMEOUT, current_frame.swapchain_semaphore, nullptr, &swapchain_img_idx));
 
-    // NOTE: Indicate to the driver that the backbuffer needs to be available as a render target.
-    D3D12_RESOURCE_BARRIER render_barrier = {};
-    render_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    render_barrier.Transition.pResource = current_frame->render_target_resource;
-    render_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    render_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    render_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    current_frame->command_list->ResourceBarrier(1, &render_barrier);
+    // NOTE: Begin using the command buffer, specifying that we will only be
+    // submitting once before resetting it (because the render commands needed
+    // for the scene are different every frame).
+    VK_ASSERT(vkResetCommandBuffer(current_frame.cmd_buffer, 0));
 
-    // NOTE: Clear the backbuffer.
-    f32 clear_color[] = {0.1, 0.1, 0.2, 1};
-    current_frame->command_list->ClearRenderTargetView(current_frame->render_target_view_descriptor, clear_color, 0, NULL);
-    current_frame->command_list->ClearDepthStencilView(current_frame->depth_target_view_descriptor, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
+    VK_ASSERT(vkBeginCommandBuffer(current_frame.cmd_buffer, &begin_info));
+
+    // NOTE: Transition the framebuffer into a format suitable for rendering.
+    VkImageMemoryBarrier2 render_barrier = {};
+    render_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    render_barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    render_barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    render_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    render_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    render_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    render_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // NOTE: This is really only useful for images with mip maps / layers,
+    // but we have to fill it no matter what.
+    render_barrier.subresourceRange = VkImageSubresourceRange {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = VK_REMAINING_MIP_LEVELS,
+        .baseArrayLayer = 0,
+        .layerCount = VK_REMAINING_ARRAY_LAYERS,
+    };
+    render_barrier.image = game_state->vk_context.swapchain_images[swapchain_img_idx];
+
+    VkDependencyInfo render_dep_info = {};
+    render_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    render_dep_info.imageMemoryBarrierCount = 1;
+    render_dep_info.pImageMemoryBarriers = &render_barrier;
+
+    vkCmdPipelineBarrier2(current_frame.cmd_buffer, &render_dep_info);
+
+    // NOTE: For dynamic rendering (without a render pass), we need to give info about
+    // the render targets and fill out a render info struct.
+
+    VkRenderingAttachmentInfo render_target_info = {};
+    render_target_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    render_target_info.imageView = game_state->vk_context.swapchain_images_views[swapchain_img_idx];
+    render_target_info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    render_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    render_target_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    render_target_info.clearValue = {.color = {0.1, 0.1, 0.2, 1.0}};
+
+    // TODO: Have a way to get the window dimensions without going to the OS...
+    VkRect2D render_area = {};
+    RECT client_rect;
+    GetClientRect(game_state->vk_context.window, &client_rect);
+    render_area.extent.height = client_rect.bottom;
+    render_area.extent.width = client_rect.right;
+
+    VkRenderingInfo rendering_info = {};
+    rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.pColorAttachments = &render_target_info;
+    rendering_info.colorAttachmentCount = 1;
+    rendering_info.layerCount = 1;
+    rendering_info.renderArea = render_area;
+
+    vkCmdBeginRendering(current_frame.cmd_buffer, &rendering_info);
+    
+    vkCmdEndRendering(current_frame.cmd_buffer);
+
+    // NOTE: Transition the framebuffer into a format suitable for presentation.
+    VkImageMemoryBarrier2 present_barrier = {};
+    present_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    present_barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    present_barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    present_barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    present_barrier.dstAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT | VK_ACCESS_2_MEMORY_READ_BIT;
+    present_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    present_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // NOTE: This is really only useful for images with mip maps / layers,
+    // but we have to fill it no matter what.
+    present_barrier.subresourceRange = VkImageSubresourceRange {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = VK_REMAINING_MIP_LEVELS,
+        .baseArrayLayer = 0,
+        .layerCount = VK_REMAINING_ARRAY_LAYERS,
+    };
+    present_barrier.image = game_state->vk_context.swapchain_images[swapchain_img_idx];
+
+    VkDependencyInfo present_dep_info = {};
+    present_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    present_dep_info.imageMemoryBarrierCount = 1;
+    present_dep_info.pImageMemoryBarriers = &present_barrier;
+
+    vkCmdPipelineBarrier2(current_frame.cmd_buffer, &present_dep_info);
+
+    // NOTE: Finalize the command buffer.
+    VK_ASSERT(vkEndCommandBuffer(current_frame.cmd_buffer));
+
+    // NOTE: And send it for execution, wiring all the synchronization.
+    VkCommandBufferSubmitInfo cmd_buffer_submit_info = {};
+    cmd_buffer_submit_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmd_buffer_submit_info.commandBuffer = current_frame.cmd_buffer;
+    // NOTE: The color attatchment output stage will wait for the swapchain
+    // semaphore to be signaled.
+    VkSemaphoreSubmitInfo wait_info = {};
+    wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    wait_info.semaphore = current_frame.swapchain_semaphore;
+    wait_info.value = 1;
+    wait_info.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // NOTE: When all graphics stages will be completed, the render semaphore
+    // will be signaled.
+    VkSemaphoreSubmitInfo signal_info = {};
+    signal_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signal_info.semaphore = current_frame.render_semaphore;
+    signal_info.value = 1;
+    signal_info.stageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+
+    VkSubmitInfo2 submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit_info.pCommandBufferInfos = &cmd_buffer_submit_info;
+    submit_info.commandBufferInfoCount = 1;
+    submit_info.pWaitSemaphoreInfos = &wait_info;
+    submit_info.waitSemaphoreInfoCount = 1;
+    submit_info.pSignalSemaphoreInfos = &signal_info;
+    submit_info.signalSemaphoreInfoCount = 1;
+
+    VK_ASSERT(vkQueueSubmit2(game_state->vk_context.queue, 1, &submit_info, current_frame.render_fence));
+
+    // NOTE: Request presentation of the frame, waiting on the render semaphore.
+    VkPresentInfoKHR present_info = {};
+    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.pSwapchains = &game_state->vk_context.swapchain;
+    present_info.swapchainCount = 1;
+    present_info.pWaitSemaphores = &current_frame.render_semaphore;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pImageIndices = &swapchain_img_idx;
+
+    VK_ASSERT(vkQueuePresentKHR(game_state->vk_context.queue, &present_info));
+
+    game_state->vk_context.frames_counter++;
+
+    /*
     // NOTE: Set the shared graphics pipeline stuff.
     RECT clientRect;
     GetClientRect(game_state->d3d_context.window, &clientRect);
@@ -1531,30 +1105,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                    CHUNK_POOL_SIZE
     );
     drawDebugTextOnScreen(&game_state->text_renderer, current_frame->command_list, debug_text_string, 0, 0);
-
-    // NOTE: The backbuffer should be transitionned to be used for presentation.
-    D3D12_RESOURCE_BARRIER present_barrier = {};
-    present_barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    present_barrier.Transition.pResource = current_frame->render_target_resource;
-    present_barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    present_barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    present_barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    current_frame->command_list->ResourceBarrier(1, &present_barrier);
-
-    // NOTE: Close the command list and send it to the GPU for execution.
-    HRESULT close_res = current_frame->command_list->Close();
-    ASSERT(SUCCEEDED(close_res));
-    game_state->d3d_context.graphics_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&current_frame->command_list);
-
-    // TODO: Sort the whole vsync situation out.
-    game_state->d3d_context.swapchain->Present(1, 0);
-
-    // NOTE: Signal this frame's fence when the graphics commands enqueued until now have completed.
-    game_state->d3d_context.graphics_command_queue->Signal(current_frame->fence, ++current_frame->fence_ready_value);
-
-    // NOTE: Get the next frame's index
-    // TODO: Confirm that this is updated by the call to Present.
-    game_state->d3d_context.current_frame_idx = game_state->d3d_context.swapchain->GetCurrentBackBufferIndex();
+    */
 
     clearArena(&game_state->frame_arena);
 }

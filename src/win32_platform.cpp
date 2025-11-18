@@ -213,16 +213,12 @@ FILETIME getFileLastWriteTime(const char* filename) {
     return file_data.ftLastWriteTime;
 }
 
-// NOTE: We need to load the D3D12 DLLs in the base
+// NOTE: We need to load the graphics DLLs in the base
 // executable so their state persists across game DLL
 // unload/reloads.
 void loadPersistentDLLs() {
-    static HMODULE d3d12_dll = LoadLibraryA("d3d12.dll");
-    USED(d3d12_dll);
-    static HMODULE dxgi_dll = LoadLibraryA("dxgi.dll");
-    USED(dxgi_dll);
-    static HMODULE d3dcompiler_dll = LoadLibraryA("d3dcompiler.dll");
-    USED(d3dcompiler_dll);
+    static HMODULE vk_dll = LoadLibraryA("vulkan-1.dll");
+    ASSERT(vk_dll != NULL)
 }
 
 void loadGameCode(GameCode* game_code, const char* src_dll_name) {
@@ -281,7 +277,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     RegisterClassA(&window_class);
 
     HWND window = CreateWindowExA(
-        /* behavior */ WS_EX_TOPMOST,
+        /* behavior */ 0,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -322,7 +318,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
         // NOTE: measure and print the time the previous frame took
         measureTimingInfo(&timing_info);
-        // printTimingInfo(&timing_info);
+        printTimingInfo(&timing_info);
 
         // NOTE: reload game code
         const char* dll_name = "game.dll";

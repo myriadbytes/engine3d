@@ -13,11 +13,23 @@ compiler_flags = [
     "-Wall",
     "-Wno-missing-braces",
     "-std=c++20",
-    "-Wl,/LTCG",  # windows linker flag to remove indirection in dll calls, makes debugging easier
     "-DNOMINMAX=1",  # including <Windows.h> name-squats common identifiers if this is not defined
 ]
-linker_flags = [""]
-syslibs = ["user32.lib", "d3d12.lib", "dxgi.lib", "d3dcompiler.lib", "gameinput.lib"]
+linker_flags = [
+    "-Wl,/LTCG",  # windows linker flag to remove indirection in dll calls, makes debugging easier
+]
+
+vk_sdk_root = Path("C:/VulkanSDK/")
+vk_sdks = list(vk_sdk_root.glob("*"))
+if len(vk_sdks) == 0:
+    raise RuntimeError("No Vulkan SDK installation found in C:/VulkanSDK")
+vk_sdks.sort()
+vk_sdk_directory = vk_sdks[-1]
+
+syslibs = ["user32.lib", "vulkan-1.lib", "gameinput.lib"]
+syslibs_directories = [str(vk_sdk_directory / "Lib")]
+include_directories = [str(vk_sdk_directory / "Include")]
+
 game_dll_exports = ["gameUpdate"]
 generate_compile_commands = True
 
@@ -52,13 +64,15 @@ linker_flags_str = " ".join(linker_flags)
 common_sources_str = " ".join(
     [str(project_dir / source) for source in common_source_files]
 )
+syslibs_str = " ".join([f"-l{name}" for name in syslibs])
+syslibs_directories_str = " ".join([f"-L{dir}" for dir in syslibs_directories])
+include_directories_str = " ".join([f"-I{dir}" for dir in include_directories])
 
 # PLATFORM EXE
 platform_sources_str = " ".join(
     [str(project_dir / source) for source in platform_source_files]
 )
 platform_output_str = f"-o {str(build_dir / exe_name)}"
-syslibs_str = " ".join([f"-l{name}" for name in syslibs])
 
 platform_compile_cmd = f"clang \
 {defines_str} \
@@ -68,6 +82,8 @@ platform_compile_cmd = f"clang \
 {platform_output_str} \
 {linker_flags_str} \
 {syslibs_str} \
+{syslibs_directories_str} \
+{include_directories_str} \
 "
 
 print("BUILDING PLATFORM...")
@@ -100,6 +116,8 @@ game_compile_cmd = f"clang \
 {linker_flags_str} \
 {game_dll_exports_str} \
 {syslibs_str} \
+{syslibs_directories_str} \
+{include_directories_str} \
 "
 
 print("BUILDING GAME DLL...")
@@ -125,7 +143,7 @@ if generate_compile_commands:
         compile_commands += "{\n"
 
         compile_commands += f'"directory": "{str(project_dir).replace("\\", "/")}",\n'
-        compile_commands += f'"command": "clang {defines_str} {compiler_flags_str} -c {str(project_dir / file).replace("\\", "/")}"\n,'
+        compile_commands += f'"command": "clang {defines_str} {compiler_flags_str} -c {str(project_dir / file).replace("\\", "/")} {include_directories_str.replace("\\", "/")}"\n,'
         compile_commands += f'"file": "{file}"\n'
 
         compile_commands += "}"
