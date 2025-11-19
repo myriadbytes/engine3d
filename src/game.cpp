@@ -132,6 +132,7 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
+    Chunk test_chunk;
     WorldHashMap world;
 
     //D3DPipeline chunk_render_pipeline;
@@ -161,9 +162,15 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         ASSERT(initializeVulkan(&game_state->vk_context, true, &game_state->frame_arena));
 
-        initGPUBuddyAllocator(&game_state->vk_context);
+        BuddyAllocator buddy_allocator = {};
+        buddyInitalize(&buddy_allocator, &game_state->static_arena, KILOBYTES(4), MEGABYTES(2), MEGABYTES(256));
 
-        //initChunkMemoryPool(&game_state->chunk_pool, game_state->d3d_context.device);
+        BuddyAllocationResult alloc_res1 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
+        BuddyAllocationResult alloc_res2 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
+        BuddyAllocationResult alloc_res3 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
+        BuddyAllocationResult alloc_res4 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
+        BuddyAllocationResult alloc_res5 = buddyAlloc(&buddy_allocator, KILOBYTES(32));
+
         game_state->world.nb_occupied = 0;
 
         game_state->player_position = {110, 40, 110};
