@@ -37,11 +37,12 @@ generate_compile_commands = True
 platform_source_files = ["src/win32_platform.cpp"]
 game_source_files = [
     "src/game.cpp",
-    "src/arena.cpp",
+    "src/allocators.cpp",
     "src/maths.cpp",
     "src/noise.cpp",
     "src/img.cpp",
     "src/world.cpp",
+    "src/gpu.cpp",
 ]
 common_source_files = []
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <d3d12.h>
+#include <vulkan/vulkan.h>
 
 #include "common.h"
 #include "maths.h"
@@ -45,21 +45,8 @@ struct Chunk {
     v3i chunk_position;
     u8 data[CHUNK_W * CHUNK_W * CHUNK_W];
     usize vertices_count;
-    ID3D12Resource* upload_buffer;
-    ID3D12Resource* vertex_buffer;
-    b32 vbo_ready;
+    VkBuffer vertex_buffer;
 };
-
-struct ChunkMemoryPool {
-    Chunk slots[CHUNK_POOL_SIZE];
-    usize free_slots[CHUNK_POOL_SIZE];
-    usize* free_slots_stack_ptr;
-    u32 nb_used;
-};
-
-void initChunkMemoryPool(ChunkMemoryPool* pool, ID3D12Device* d3d_device);
-Chunk* acquireChunkMemoryFromPool(ChunkMemoryPool* pool);
-void releaseChunkMemoryToPool(ChunkMemoryPool* pool, Chunk* chunk);
 
 // NOTE: The actual world will modeled using a hashmap that associates world
 // coordinates to chunk handles. There are surely smarter and fancier ways to

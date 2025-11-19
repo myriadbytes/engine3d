@@ -15,24 +15,21 @@
 // https://github.com/KdotJPG/OpenSimplex2/
 
 
-SimplexTable* simplex_table_from_seed(u64 seed, Arena* arena) {
-    SimplexTable* result = pushStruct(arena, SimplexTable);
+void simplex_table_from_seed(SimplexTable* to_init, u64 seed) {
 
-    for (usize i = 0; i < ARRAY_COUNT(result->permutations); i++) {
-        result->permutations[i] = i;
+    for (usize i = 0; i < ARRAY_COUNT(to_init->permutations); i++) {
+        to_init->permutations[i] = i;
     }
 
     // NOTE: This is called a Fisher–Yates shuffle, apparently.
-    for (usize i = ARRAY_COUNT(result->permutations) - 1; i > 0; i--) {
+    for (usize i = ARRAY_COUNT(to_init->permutations) - 1; i > 0; i--) {
         f32 r = randomUnilateral(&seed);
-        usize j = (u32)(r * (f32)i);
+        usize j = (usize)(r * (f32)i);
 
-        u8 tmp = result->permutations[i];
-        result->permutations[i] = result->permutations[j];
-        result->permutations[j] = tmp;
+        u8 tmp = to_init->permutations[i];
+        to_init->permutations[i] = to_init->permutations[j];
+        to_init->permutations[j] = tmp;
     }
-
-    return result;
 }
 
 inline u8 perm_hash(SimplexTable* simplex_state, u32 i) {
