@@ -25,18 +25,27 @@ inline v3 chunkToWorldPos(v3i chunk_pos) {
     };
 }
 
-// NOTE: How many chunks to load around the player. A radius of 1 would mean
-// 5 chunks in a diamon pattern, the center one being the chunk the player is
-// inside.
+// NOTE: How many chunks to load around the player, in ALL 3 directions.
+// A radius of 1 would mean 7 chunks in a diamond pattern, the center one
+// being the chunk the player is inside.
 constexpr i32 LOAD_RADIUS = 5;
 
 // NOTE: We'll allocate a pool of chunks at startup, so that there is no memory
-// allocation / VRAM buffer creation at runtime. When we want to load a new chunk,
-// we'll just get an unused one from the pool. Even tho we're only supposed to
-// load chunks in a sphere around the player, we'll allocate enough memory for the
-// cube encapsulating this sphere, because it's easy to compute at compile time
-// and gives us some (a lot actually) of leeway. But a better upper bound needs
-// to be computed eventually.
+// allocation for the chunk backing data at runtime. We can affort to do this
+// because it's relatively little data and is constant for every chunk. VRAM
+// and vertex buffers are a very different story : the size is highly variable
+// depending on the chunk's geometry and the worst case size (2MB) is much higher
+// than the average (a few KB). Trying to startup-alloc enough VRAM for the loaded
+// world with worst case buffer size would lead to ~10GB of VRAM usage. So I am using
+// an actual memory allocator with a backing VRAM buffer of <1 GB. When we want to
+// load a new chunk, we'll just get an unused one from the pool. VRAM for the
+// vertex buffers will be allocated/deallocated/reallocated during the rendering
+// loop I think, and we'll just tag the new / modified chunks as "needing remeshing".
+// Even tho we're only supposed to load chunks in a sphere around the player, we'll
+// allocate enough memory for the cube encapsulating this sphere, because it's easy
+// to compute at compile time and gives us some (a lot actually) of leeway, for
+// "always-loaded" special chunks for example. But a better upper bound should be
+// found eventually.
 constexpr usize CHUNK_POOL_SIZE = (LOAD_RADIUS * 2 + 1)
                                 * (LOAD_RADIUS * 2 + 1)
                                 * (LOAD_RADIUS * 2 + 1);
@@ -49,23 +58,10 @@ struct Chunk {
 };
 
 // NOTE: The actual world will modeled using a hashmap that associates world
-// coordinates to chunk handles. There are surely smarter and fancier ways to
-// do this, but for now this allows easy chunk querying based on position.
-// FIXME: After enough insertion/deletions, we start to run out of EMPTY
-// buckets because they all have been replaced by REUSABLE buckets. But we
-// use EMPTY buckets as a stop condition in several hash map routines, so
-// the more the hash map gets used the slower they become, and when there
-// are no more EMPTY buckets we just get caught in an infinite loop. How
-// come none of the hashmap tutorials I've seen or even LLMs mention that ?
-
-struct WorldEntry {
-    usize hash;
-    v3i key;
-    Chunk* value;
-
-    b32 is_occupied;
-    u32 home_distance;
-};
+// coordinates to chunk handles. This is JUST FOR ACCESS/QUERY. No game world
+// related memory is managed or owned by the hashmap. There are surely smarter
+// and fancier ways to do this, but for now this allows easy chunk querying
+// based on position.
 
 // Ideally, we would want the max occupancy of the hash map to be 70%. Using the
 // number of chunks we have in the pool is actually a good approximation, since
@@ -78,19 +74,7 @@ constexpr usize nextPowerOfTwo(usize n) {
     }
     return value;
 }
-constexpr usize HASHMAP_SIZE = nextPowerOfTwo(CHUNK_POOL_SIZE);
-
-struct WorldHashMap {
-    WorldEntry entries[HASHMAP_SIZE];
-    usize nb_occupied;
-};
-
-// NOTE: This is just a helper to iterate over loaded chunks
-// so it only returns something for active entries.
-Chunk* getChunkByIndex(WorldHashMap* world, usize idx);
-b32 isChunkInWorld(WorldHashMap* world, v3i chunk_position);
-void worldInsert(WorldHashMap* world, v3i chunk_position, Chunk* chunk);
-void worldDelete(WorldHashMap* world, v3i chunk_position);
+constexpr usize WORLD_HASHMAP_SIZE = nextPowerOfTwo(CHUNK_POOL_SIZE);
 
 // TODO: This can surely be optimized. We don't need a v3 (96 bits) to store the
 // normal vector when we have only 6 different normal directions (3 bits) !
@@ -98,8 +82,3 @@ struct ChunkVertex {
     v3 position;
     v3 normal;
 };
-
-// NOTE: This is the worst case number of vertices that would be needed with our
-// current meshing strategy for a chunk mesh (with a "checkerboard" chunk). This
-// stops being true once we add transparent blocks. Too bad !
-constexpr usize WORST_CASE_CHUNK_VERTICES = ((CHUNK_W * CHUNK_W * CHUNK_W) / 2) * 6 * 2 * 3;

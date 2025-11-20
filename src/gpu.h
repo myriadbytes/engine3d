@@ -35,14 +35,25 @@ struct VulkanContext {
     VkImage swapchain_images[FRAMES_IN_FLIGHT];
     VkImageView swapchain_images_views[FRAMES_IN_FLIGHT];
     FrameContext frames[FRAMES_IN_FLIGHT];
+    VkDescriptorPool uniforms_desc_pool;
     u64 frames_counter;
 };
 
 b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena);
 
-struct GPUMemoryAllocator {
+struct VulkanMemoryAllocator {
     BuddyAllocator allocator;    
     VkDeviceMemory memory;    
 };
 
-b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_context, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);
+b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);
+
+VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, Arena* scratch_arena);
+
+struct VulkanPipeline {
+    VkPipeline pipeline;  
+    VkPipelineLayout layout;
+    VkDescriptorSetLayout desc_set_layout;
+};
+
+void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena);

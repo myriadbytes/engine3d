@@ -4,6 +4,7 @@
 #include <strsafe.h>
 
 #include "common.h"
+#include "containers.h"
 #include "game_api.h"
 #include "maths.h"
 #include "noise.h"
@@ -119,6 +120,16 @@ void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_
     *out_generated_vertex_count = emitted;
 }
 
+// NOTE: ChatGPT wrote that. I hope it's a good hash.
+// It uses prime numbers so you know it must be.
+usize chunkPositionHash(v3i chunk_position) {
+    usize hash = 0;
+    hash ^= (usize)(chunk_position.x * 73856093);
+    hash ^= (usize)(chunk_position.y * 19349663);
+    hash ^= (usize)(chunk_position.z * 83492791);
+    return hash;
+}
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -132,12 +143,23 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    GPUMemoryAllocator gpu_allocator;
-    WorldHashMap world;
-    Pool<Chunk, 32> chunk_pool;
+    // NOTE: Big chunk of VRAM with big subdivision for vertex buffers.
+    VulkanMemoryAllocator vertex_buffers_allocator;
+    // NOTE: Small chunk of host RAM with small subdivision for uniforms like matrices.
+    VulkanMemoryAllocator uniforms_allocator;
+    u8* uniforms_memory_mapped;
 
-    //D3DPipeline chunk_render_pipeline;
-    //D3DPipeline wireframe_render_pipeline;
+    Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world;
+    Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
+
+    VulkanPipeline chunk_render_pipeline;
+    // VulkanPipeline wireframe_render_pipeline;
+
+    VkBuffer view_matrix_buffers[FRAMES_IN_FLIGHT];
+    usize view_matrix_buffers_offsets[FRAMES_IN_FLIGHT];
+    VkBuffer projection_matrix_buffers[FRAMES_IN_FLIGHT];
+    usize projection_matrix_buffers_offsets[FRAMES_IN_FLIGHT];
+    VkDescriptorSet matrices_desc_sets[FRAMES_IN_FLIGHT];
 
     b32 is_wireframe;
 
@@ -162,11 +184,25 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
         ASSERT(initializeVulkan(&game_state->vk_context, true, &game_state->frame_arena));
-        ASSERT(initializeGPUAllocator(&game_state->gpu_allocator, &game_state->vk_context, &game_state->static_arena, KILOBYTES(4), MEGABYTES(2), MEGABYTES(256)));
+        ASSERT(initializeGPUAllocator(
+                &game_state->vertex_buffers_allocator,
+                &game_state->vk_context,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                &game_state->static_arena,
+                KILOBYTES(4),
+                MEGABYTES(2),
+                MEGABYTES(256)));
+        ASSERT(initializeGPUAllocator(
+                &game_state->uniforms_allocator,
+                &game_state->vk_context,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &game_state->static_arena,
+                4,
+                64,
+                KILOBYTES(8)));
 
+        hashmapInitialize(&game_state->world, &chunkPositionHash);
         poolInitialize(&game_state->chunk_pool);
-
-        game_state->world.nb_occupied = 0;
 
         game_state->player_position = {110, 40, 110};
         game_state->orbit_mode = false;
@@ -176,7 +212,62 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         simplex_table_from_seed(&game_state->simplex_table, 0xC0FFEE);
 
-        //createChunkRenderPipelines(&game_state->d3d_context, &game_state->chunk_render_pipeline, &game_state->wireframe_render_pipeline);
+        createChunkRenderPipelines(&game_state->vk_context, &game_state->chunk_render_pipeline, &game_state->frame_arena);
+
+        for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+            // NOTE: Create 3 small RAM (but GPU-visible) buffers per-frame for the model, view and projection matrices.
+            VkBufferCreateInfo buffer_info = {};
+            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            buffer_info.size = sizeof(m4);
+            buffer_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            VK_ASSERT(vkCreateBuffer(game_state->vk_context.device, &buffer_info, nullptr, &game_state->view_matrix_buffers[frame_idx]));
+            BuddyAllocationResult view_alloc = buddyAlloc(&game_state->uniforms_allocator.allocator, sizeof(m4));
+            ASSERT(view_alloc.size != 0);
+            VK_ASSERT(vkBindBufferMemory(game_state->vk_context.device, game_state->view_matrix_buffers[frame_idx], game_state->uniforms_allocator.memory, view_alloc.offset));
+            game_state->view_matrix_buffers_offsets[frame_idx] = view_alloc.offset;
+
+            VK_ASSERT(vkCreateBuffer(game_state->vk_context.device, &buffer_info, nullptr, &game_state->projection_matrix_buffers[frame_idx]));
+            BuddyAllocationResult proj_alloc = buddyAlloc(&game_state->uniforms_allocator.allocator, sizeof(m4));
+            ASSERT(proj_alloc.size != 0);
+            VK_ASSERT(vkBindBufferMemory(game_state->vk_context.device, game_state->projection_matrix_buffers[frame_idx], game_state->uniforms_allocator.memory, proj_alloc.offset));
+            game_state->projection_matrix_buffers_offsets[frame_idx] = proj_alloc.offset;
+
+            // NOTE: Allocate one descriptor set per-frame for those matrices.
+            VkDescriptorSetAllocateInfo set_alloc_info = {};
+            set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            set_alloc_info.descriptorPool = game_state->vk_context.uniforms_desc_pool;
+            set_alloc_info.descriptorSetCount = 1;
+            set_alloc_info.pSetLayouts = &game_state->chunk_render_pipeline.desc_set_layout;
+            VK_ASSERT(vkAllocateDescriptorSets(game_state->vk_context.device, &set_alloc_info, &game_state->matrices_desc_sets[frame_idx]));
+
+            // NOTE: Write the buffer descriptors to that frame descriptor set.
+            VkDescriptorBufferInfo buffer_desc_infos[2];
+            buffer_desc_infos[0].buffer = game_state->view_matrix_buffers[frame_idx];
+            buffer_desc_infos[0].offset = 0;
+            buffer_desc_infos[0].range = sizeof(m4);
+            buffer_desc_infos[1].buffer = game_state->projection_matrix_buffers[frame_idx];
+            buffer_desc_infos[1].offset = 0;
+            buffer_desc_infos[1].range = sizeof(m4);
+            
+            VkWriteDescriptorSet set_writes[2] = {};
+            set_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            set_writes[0].dstSet = game_state->matrices_desc_sets[frame_idx];
+            set_writes[0].dstBinding = 0;
+            set_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            set_writes[0].descriptorCount = 1;
+            set_writes[0].pBufferInfo = &buffer_desc_infos[0];
+            set_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            set_writes[1].dstSet = game_state->matrices_desc_sets[frame_idx];
+            set_writes[1].dstBinding = 1;
+            set_writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            set_writes[1].descriptorCount = 1;
+            set_writes[1].pBufferInfo = &buffer_desc_infos[1];
+
+            vkUpdateDescriptorSets(game_state->vk_context.device, ARRAY_COUNT(set_writes), set_writes, 0, nullptr);
+        }
+        // NOTE: Map our uniform memory to edit the buffers after the fact.
+        vkMapMemory(game_state->vk_context.device, game_state->uniforms_allocator.memory, 0, game_state->uniforms_allocator.allocator.total_size, 0, (void**)&game_state->uniforms_memory_mapped);
 
         //initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
 
@@ -319,6 +410,57 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     rendering_info.renderArea = render_area;
 
     vkCmdBeginRendering(current_frame.cmd_buffer, &rendering_info);
+
+    // NOTE: Update the matrices for this frame.
+    m4* view_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->view_matrix_buffers_offsets[swapchain_img_idx]);
+    m4* projection_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->projection_matrix_buffers_offsets[swapchain_img_idx]);
+
+    *view_mat = lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
+    *projection_mat = makeProjection(0.1, 1000, 90);
+
+    // NOTE: Bind the pipeline, set the dynamic state and bind the
+    // descriptor set for the frame-constant matrices.
+    vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
+
+    VkViewport viewport = {};
+    viewport.x = 0;
+    viewport.y = 0;
+    viewport.width = client_rect.right;
+    viewport.height = client_rect.bottom;
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+
+    vkCmdSetViewport(current_frame.cmd_buffer, 0, 1, &viewport);
+
+    VkRect2D scissor = {};
+    scissor.offset.x = 0;
+    scissor.offset.y = 0;
+    scissor.extent.width = client_rect.right;
+    scissor.extent.height = client_rect.bottom;
+
+    vkCmdSetScissor(current_frame.cmd_buffer, 0, 1, &scissor);
+
+    vkCmdBindDescriptorSets(
+        current_frame.cmd_buffer,
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        game_state->chunk_render_pipeline.layout,
+        0,
+        1,
+        &game_state->matrices_desc_sets[swapchain_img_idx],
+        0,
+        nullptr
+    );
+
+    m4 model_mat = makeTranslation(0, 0, 0);
+
+    vkCmdPushConstants(
+        current_frame.cmd_buffer,
+        game_state->chunk_render_pipeline.layout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof(m4),
+        &model_mat
+    );
 
     vkCmdEndRendering(current_frame.cmd_buffer);
 

@@ -1,6 +1,7 @@
 #include <strsafe.h>
 
 #include "gpu.h"
+#include "world.h"
 
 // TODO: Automatic debug mode based on internal / release build.
 b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena) {
@@ -202,10 +203,21 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
         VK_ASSERT(vkCreateSemaphore(to_init->device, &semaphore_info, nullptr, &to_init->frames[frame_idx].render_semaphore));
     }
 
+    // NOTE: Create the descriptor pool for our uniform buffers.
+    VkDescriptorPoolSize uniform_pool_size = {};
+    uniform_pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uniform_pool_size.descriptorCount = 32;
+    VkDescriptorPoolCreateInfo uniform_pool_info = {};
+    uniform_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    uniform_pool_info.pPoolSizes = &uniform_pool_size;
+    uniform_pool_info.poolSizeCount = 1;
+    uniform_pool_info.maxSets = 8;
+    VK_ASSERT(vkCreateDescriptorPool(to_init->device, &uniform_pool_info, nullptr, &to_init->uniforms_desc_pool));
+
     return true;
 }
 
-b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_context, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size) {
+b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size) {
     *gpu_allocator = {};
 
     // NOTE: Find which memory index to use.
@@ -228,7 +240,7 @@ b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_
         OutputDebugStringA(print_buffer);
     }
 
-    i32 vram_memory_idx = -1;
+    i32 memory_idx = -1;
     for (u32 type_idx = 0; type_idx < mem_props.memoryProperties.memoryTypeCount; type_idx++) {
         char print_buffer[128];
         VkMemoryType& mem_type = mem_props.memoryProperties.memoryTypes[type_idx];
@@ -243,18 +255,18 @@ b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_
         );
         OutputDebugStringA(print_buffer);
 
-        if ((mem_type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-        && !(mem_type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
-            vram_memory_idx = mem_type.heapIndex;
+        if (mem_type.propertyFlags == memory_properties) {
+            memory_idx = type_idx;
+            break;
         }
     }
-    ASSERT(vram_memory_idx != -1);
+    ASSERT(memory_idx != -1);
 
     // NOTE: Do the actual allocation.
     VkMemoryAllocateInfo alloc_info = {};
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc_info.allocationSize = total_size;
-    alloc_info.memoryTypeIndex = vram_memory_idx;
+    alloc_info.memoryTypeIndex = memory_idx;
 
     VK_ASSERT(vkAllocateMemory(vk_context->device, &alloc_info, nullptr, &gpu_allocator->memory));
 
@@ -262,4 +274,183 @@ b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_
     buddyInitalize(&gpu_allocator->allocator, metadata_arena, min_alloc_size, max_alloc_size, total_size);
 
     return true;
+}
+
+// TODO: This should handle errors gracefully. Maybe a default shader enbedded in the exe ?
+VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, Arena* scratch_arena) {
+    // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
+    wchar_t windows_path[128];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, windows_path, ARRAY_COUNT(windows_path));
+    
+    
+    HANDLE file_handle = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    ASSERT(file_handle != INVALID_HANDLE_VALUE);
+
+    // WARN: This crashes for shader files larger than 4GB...
+    // I think we're safe !
+    DWORD file_size_high = 0;
+    DWORD file_size = GetFileSize(file_handle, &file_size_high);
+    ASSERT(file_size_high == 0);
+
+    u8* shader_bytes = (u8*)pushBytes(scratch_arena, file_size);
+    DWORD bytes_read;
+    ReadFile(file_handle, (void*)shader_bytes, file_size, &bytes_read, NULL);
+    ASSERT(bytes_read == file_size);
+    CloseHandle(file_handle);
+
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = file_size;
+    create_info.pCode = (const u32*)shader_bytes;
+
+    VkShaderModule result;
+    VK_ASSERT(vkCreateShaderModule(vk_context->device, &create_info, nullptr, &result));
+
+    return result;
+}
+
+void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena) {
+    VkShaderModule chunk_vert_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.vert.spv", scratch_arena);
+    VkShaderModule chunk_frag_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.frag.spv", scratch_arena);
+
+    VkPipelineShaderStageCreateInfo shader_stages[2] = {};
+    shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stages[0].module = chunk_vert_shader;
+    shader_stages[0].pName = "main";
+    shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shader_stages[1].module = chunk_frag_shader;
+    shader_stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vertex_binding_descs[1];
+    vertex_binding_descs[0].binding = 0;
+    vertex_binding_descs[0].stride = sizeof(ChunkVertex);
+    vertex_binding_descs[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    VkVertexInputAttributeDescription vertex_attribute_descriptions[2];
+    vertex_attribute_descriptions[0].binding = 0;
+    vertex_attribute_descriptions[0].location = 0;
+    vertex_attribute_descriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vertex_attribute_descriptions[0].offset = 0;
+    vertex_attribute_descriptions[1].binding = 0;
+    vertex_attribute_descriptions[1].location = 1;
+    vertex_attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    vertex_attribute_descriptions[1].offset = sizeof(v3);
+
+    VkPipelineVertexInputStateCreateInfo vertex_input_info = {};
+    vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input_info.pVertexBindingDescriptions = vertex_binding_descs;
+    vertex_input_info.vertexBindingDescriptionCount = ARRAY_COUNT(vertex_binding_descs);
+    vertex_input_info.pVertexAttributeDescriptions = vertex_attribute_descriptions;
+    vertex_input_info.vertexAttributeDescriptionCount = ARRAY_COUNT(vertex_attribute_descriptions);
+
+    VkPipelineInputAssemblyStateCreateInfo assembly_info = {};
+    assembly_info.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineTessellationStateCreateInfo tesselation_info = {};
+    tesselation_info.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+
+    // NOTE: We will use dynamic state for the viewport.
+    VkPipelineViewportStateCreateInfo viewport_info = {};
+    viewport_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_info.viewportCount = 1;
+    viewport_info.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster_info = {};
+    raster_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster_info.polygonMode = VK_POLYGON_MODE_FILL;
+    raster_info.cullMode = VK_CULL_MODE_BACK_BIT;
+    raster_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster_info.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample_info = {};
+    multisample_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {};
+    depth_stencil_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+
+    VkPipelineColorBlendAttachmentState blend_attachment = {};
+    blend_attachment.blendEnable = VK_FALSE;
+    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT
+                                      | VK_COLOR_COMPONENT_G_BIT
+                                      | VK_COLOR_COMPONENT_B_BIT
+                                      | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo blend_info = {};
+    blend_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend_info.logicOpEnable = VK_FALSE;
+    blend_info.logicOp = VK_LOGIC_OP_COPY;
+    blend_info.pAttachments = &blend_attachment;
+    blend_info.attachmentCount = 1;
+
+    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
+    dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic_state_info.pDynamicStates = dynamic_states;
+    dynamic_state_info.dynamicStateCount = ARRAY_COUNT(dynamic_states);
+
+    // NOTE: 2 uniform buffers for view and projection matrices.
+    VkDescriptorSetLayoutBinding shader_bindings[2] = {};
+    shader_bindings[0].binding = 0;
+    shader_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    shader_bindings[0].descriptorCount = 1;
+    shader_bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_bindings[1].binding = 1;
+    shader_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    shader_bindings[1].descriptorCount = 1;
+    shader_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayoutCreateInfo set_info = {};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_info.pBindings = shader_bindings;
+    set_info.bindingCount = ARRAY_COUNT(shader_bindings);
+
+    VK_ASSERT(vkCreateDescriptorSetLayout(vk_context->device, &set_info, nullptr, &chunk_pipeline->desc_set_layout));
+
+    // NOTE: 1 push constant for the model matrix.
+    VkPushConstantRange push_constants[1] = {};
+    push_constants[0].offset = 0;
+    push_constants[0].size = sizeof(m4);
+    push_constants[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkPipelineLayoutCreateInfo layout_info = {};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.pSetLayouts = &chunk_pipeline->desc_set_layout;
+    layout_info.setLayoutCount = 1;
+    layout_info.pPushConstantRanges = push_constants;
+    layout_info.pushConstantRangeCount = ARRAY_COUNT(push_constants);
+
+    VkPipelineLayout layout;
+    VK_ASSERT(vkCreatePipelineLayout(vk_context->device, &layout_info, nullptr, &layout));
+
+    VkFormat color_attachment_format = VK_FORMAT_B8G8R8A8_SRGB;
+    VkPipelineRenderingCreateInfo rendering_info = {};
+    rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering_info.colorAttachmentCount = 1;
+    rendering_info.pColorAttachmentFormats = &color_attachment_format;
+
+    VkGraphicsPipelineCreateInfo pipeline_info = {};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.pNext = &rendering_info;
+    pipeline_info.pStages = shader_stages;
+    pipeline_info.stageCount = ARRAY_COUNT(shader_stages);
+    pipeline_info.pVertexInputState = &vertex_input_info;
+    pipeline_info.pInputAssemblyState = &assembly_info;
+    pipeline_info.pTessellationState = &tesselation_info;
+    pipeline_info.pViewportState = &viewport_info;
+    pipeline_info.pRasterizationState = &raster_info;
+    pipeline_info.pMultisampleState = &multisample_info;
+    pipeline_info.pDepthStencilState = &depth_stencil_info;
+    pipeline_info.pColorBlendState = &blend_info;
+    pipeline_info.pDynamicState = &dynamic_state_info;
+    pipeline_info.layout = layout;
+
+    chunk_pipeline->layout = layout;
+    VK_ASSERT(vkCreateGraphicsPipelines(vk_context->device, nullptr, 1, &pipeline_info, nullptr, &chunk_pipeline->pipeline))
+
+    vkDestroyShaderModule(vk_context->device, chunk_vert_shader, nullptr);
+    vkDestroyShaderModule(vk_context->device, chunk_frag_shader, nullptr);
 }

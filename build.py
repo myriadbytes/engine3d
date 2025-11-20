@@ -22,7 +22,7 @@ linker_flags = [
 vk_sdk_root = Path("C:/VulkanSDK/")
 vk_sdks = list(vk_sdk_root.glob("*"))
 if len(vk_sdks) == 0:
-    raise RuntimeError("No Vulkan SDK installation found in C:/VulkanSDK")
+    raise RuntimeError("No Vulkan SDK found in C:/VulkanSDK")
 vk_sdks.sort()
 vk_sdk_directory = vk_sdks[-1]
 
@@ -41,12 +41,12 @@ game_source_files = [
     "src/maths.cpp",
     "src/noise.cpp",
     "src/img.cpp",
-    "src/world.cpp",
     "src/gpu.cpp",
 ]
 common_source_files = []
 
-assets_directories = ["shaders", "assets"]
+assets_directories = ["assets"]
+shader_directories = ["shaders"]
 
 # SETUP
 project_dir = Path(__file__).parent
@@ -156,8 +156,32 @@ if generate_compile_commands:
 
     _ = Path(project_dir / "compile_commands.json").write_text(compile_commands)
 
+# SHADER COMPILATION
+shader_success = True
+for shader_dir in shader_directories:
+    shader_out_dir = build_dir / shader_dir
+    shader_out_dir.mkdir(exist_ok=True)
+
+    shader_sources: list[Path] = []
+    for vertex_shader_source in (project_dir / shader_dir).glob("*.vert"):
+        shader_sources.append(vertex_shader_source)
+    for fragment_shader_source in (project_dir / shader_dir).glob("*.frag"):
+        shader_sources.append(fragment_shader_source)
+
+    for shader_source in shader_sources:
+        source_file_str = str(shader_source)
+        output_file_str = str(shader_out_dir / (shader_source.name + ".spv"))
+        bin_str = str(project_dir / "tools" / "glslc.exe")
+        shader_cmd = f"{bin_str} {source_file_str} -o {output_file_str}"
+        shader_result = subprocess.run(
+            shader_cmd, shell=True, capture_output=True, text=True
+        )
+        if len(shader_result.stderr) > 0:
+            shader_success = False
+            print(shader_result.stderr.strip())
+
 # OUTPUT
-if platform_success and game_success:
+if platform_success and game_success and shader_success:
     print("BUILD SUCCESS")
     exit(0)
 else:
