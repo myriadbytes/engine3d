@@ -205,7 +205,9 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
     return true;
 }
 
-void initGPUBuddyAllocator(VulkanContext* vk_context) {
+b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_context, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size) {
+    *gpu_allocator = {};
+
     // NOTE: Find which memory index to use.
 
     VkPhysicalDeviceMemoryProperties2 mem_props = {};
@@ -251,9 +253,13 @@ void initGPUBuddyAllocator(VulkanContext* vk_context) {
     // NOTE: Do the actual allocation.
     VkMemoryAllocateInfo alloc_info = {};
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = MEGABYTES(512);
+    alloc_info.allocationSize = total_size;
     alloc_info.memoryTypeIndex = vram_memory_idx;
 
-    VkDeviceMemory memory;
-    VK_ASSERT(vkAllocateMemory(vk_context->device, &alloc_info, nullptr, &memory));
+    VK_ASSERT(vkAllocateMemory(vk_context->device, &alloc_info, nullptr, &gpu_allocator->memory));
+
+    // NOTE: Initialize the buddy allocator that will be used to manage the allocations
+    buddyInitalize(&gpu_allocator->allocator, metadata_arena, min_alloc_size, max_alloc_size, total_size);
+
+    return true;
 }

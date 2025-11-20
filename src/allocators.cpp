@@ -29,54 +29,6 @@ void clearArena(Arena* arena) {
     arena->used = 0;
 }
 
-// POOL
-
-template <typename T, usize N>
-void poolInitialize(Pool<T, N>* pool) {
-    // TODO: Maybe zero out the memory ?
-
-    // NOTE: We are using u16 for the slot indices, so check that
-    // this will not cause troubles.
-    ASSERT(N < UINT16_MAX);
-
-    pool->nb_allocated = 0;
-
-    // NOTE: Fill the free stack with all the indices.
-    for (int i = 0; i < N; i++) {
-        pool->free_stack[i] = N - i - 1;
-    }
-
-    // NOTE: The first time we want to get a chunk, we'll read off from
-    // the end of the free slots stack and decrement the pointer.
-    pool->free_stack_ptr = pool->free_stack + (N - 1);
-}
-
-template <typename T, usize N>
-T* PoolAcquireItem(Pool<T, N>* pool) {
-    ASSERT(pool->free_stack_ptr >= pool->free_stack);
-
-    u16 slot = *(pool->free_stack_ptr);
-
-    pool->free_stack_ptr--;
-    pool->nb_allocated++;
-
-    return pool->slots + slot;
-}
-
-template <typename T, usize N>
-void PoolReleaseItem(Pool<T, N>* pool, T* item) {
-    ASSERT(pool->free_stack_ptr < pool->free_stack + N);
-
-    // TRICKY: Pointer arithmetic here to get the slot index
-    // from just the item adress.
-    u16 slot = (u16)(item - pool->slots);
-
-    pool->free_stack_ptr++;
-    *(pool->free_stack_ptr) = slot;
-
-    pool->nb_allocated--;
-}
-
 // BUDDY
 
 inline u8 buddyFastLog2(usize v) { return v <= 1 ? 0 : 64 - __builtin_clzll(v - 1); }
@@ -237,4 +189,52 @@ BuddyAllocationResult buddyAlloc(BuddyAllocator* allocator, usize size) {
     result.size = 1 << (buddyFastLog2(allocator->min_alloc_size) + pool_idx);
 
     return result;
+}
+
+void buddyFree(BuddyAllocator* allocator, usize offset) {
+    ASSERT(offset < allocator->total_size);
+
+    u32 slot_idx = offset / allocator->min_alloc_size;
+    BuddySlotMetadata* slot = &allocator->slots_meta[slot_idx];
+
+    // NOTE: The allocated slot should not be part of a free list,
+    // because it is... well.. not free.
+    ASSERT(slot->allocated);
+    ASSERT(!slot->freelist_valid);
+
+    // NOTE: If this slot's buddy is free, we can merge them and move up
+    // to the next bigger pool, repeating while the merged slot's buddy
+    // is free.
+    slot->allocated = false;
+    u8 pool_idx = slot->pool_idx;
+    while (pool_idx < allocator->pool_count - 1) {
+        // NOTE: Same bitwise trick as in the insertion, see the comment there.
+        u32 buddy_idx = slot_idx ^ (1 << pool_idx);
+        BuddySlotMetadata* buddy_slot = &allocator->slots_meta[buddy_idx];
+
+        // NOTE: We cannot merge if:
+        // - The buddy is not in a free list.
+        // - The buddy is subdivided and used in a smaller allocation pool.
+        if (!buddy_slot->freelist_valid || buddy_slot->pool_idx < pool_idx) {
+            break;
+        }
+
+        ASSERT(!buddy_slot->allocated);
+        ASSERT(buddy_slot->pool_idx == pool_idx);
+
+        // NOTE: Remove the buddy about to be merged from its free list, since
+        // the merged buddies are gonna be added to the next pool's free list.
+        buddyUtilsRemoveFromFreeList(allocator, buddy_idx);
+
+        // NOTE: Update the slot idx to be the idx of the left buddy.
+        slot_idx = slot_idx < buddy_idx ? slot_idx : buddy_idx;
+
+        pool_idx++;
+    }
+
+    // Add the new merged (or not) block to the right free list.
+    slot = &allocator->slots_meta[slot_idx];
+    ASSERT(!slot->allocated);
+    slot->pool_idx = pool_idx;
+    buddyUtilsAddHeadToFreeList(allocator, slot_idx);
 }

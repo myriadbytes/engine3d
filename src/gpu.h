@@ -39,4 +39,10 @@ struct VulkanContext {
 };
 
 b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena);
-void initGPUBuddyAllocator(VulkanContext* vk_context);
+
+struct GPUMemoryAllocator {
+    BuddyAllocator allocator;    
+    VkDeviceMemory memory;    
+};
+
+b32 initializeGPUAllocator(GPUMemoryAllocator* gpu_allocator, VulkanContext* vk_context, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);

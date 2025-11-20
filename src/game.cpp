@@ -132,8 +132,9 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    Chunk test_chunk;
+    GPUMemoryAllocator gpu_allocator;
     WorldHashMap world;
+    Pool<Chunk, 32> chunk_pool;
 
     //D3DPipeline chunk_render_pipeline;
     //D3DPipeline wireframe_render_pipeline;
@@ -161,15 +162,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
         ASSERT(initializeVulkan(&game_state->vk_context, true, &game_state->frame_arena));
+        ASSERT(initializeGPUAllocator(&game_state->gpu_allocator, &game_state->vk_context, &game_state->static_arena, KILOBYTES(4), MEGABYTES(2), MEGABYTES(256)));
 
-        BuddyAllocator buddy_allocator = {};
-        buddyInitalize(&buddy_allocator, &game_state->static_arena, KILOBYTES(4), MEGABYTES(2), MEGABYTES(256));
-
-        BuddyAllocationResult alloc_res1 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
-        BuddyAllocationResult alloc_res2 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
-        BuddyAllocationResult alloc_res3 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
-        BuddyAllocationResult alloc_res4 = buddyAlloc(&buddy_allocator, KILOBYTES(8));
-        BuddyAllocationResult alloc_res5 = buddyAlloc(&buddy_allocator, KILOBYTES(32));
+        poolInitialize(&game_state->chunk_pool);
 
         game_state->world.nb_occupied = 0;
 
