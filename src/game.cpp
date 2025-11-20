@@ -149,8 +149,17 @@ struct GameState {
     VulkanMemoryAllocator uniforms_allocator;
     u8* uniforms_memory_mapped;
 
-    Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world;
-    Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
+    // NOTE: We'll have a few staging buffers
+    // so we can upload multiple meshes per frame.
+    // Each one is 2 MB, the max size of a chunk mesh
+    // (until we add transparent blocks).
+    VkDeviceMemory staging_memory;
+    u8* staging_memory_mapped;
+    VkBuffer staging_buffers[16];
+
+    // Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world;
+    // Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
+    Chunk test_chunk;
 
     VulkanPipeline chunk_render_pipeline;
     // VulkanPipeline wireframe_render_pipeline;
@@ -201,8 +210,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                 64,
                 KILOBYTES(8)));
 
-        hashmapInitialize(&game_state->world, &chunkPositionHash);
-        poolInitialize(&game_state->chunk_pool);
+        // hashmapInitialize(&game_state->world, &chunkPositionHash);
+        // poolInitialize(&game_state->chunk_pool);
 
         game_state->player_position = {110, 40, 110};
         game_state->orbit_mode = false;
@@ -268,6 +277,64 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         }
         // NOTE: Map our uniform memory to edit the buffers after the fact.
         vkMapMemory(game_state->vk_context.device, game_state->uniforms_allocator.memory, 0, game_state->uniforms_allocator.allocator.total_size, 0, (void**)&game_state->uniforms_memory_mapped);
+
+
+        // NOTE: Initialize the test chunk.
+        v3i test_chunk_pos = {5, 2, 5};
+        for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
+            u32 block_x = test_chunk_pos.x * CHUNK_W + (block_idx % CHUNK_W);
+            u32 block_y = test_chunk_pos.y * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
+            u32 block_z = test_chunk_pos.z * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
+
+            // TODO: This needs to be parameterized and put into a function.
+            // The fancy name is "fractal brownian motion", but it's just summing
+            // noise layers with reducing intensity and increasing frequency.
+            f32 space_scaling_factor = 0.01;
+            f32 height_intensity = 32.0;
+            f32 height = 0;
+            for (i32 octave = 0; octave < 5; octave ++) {
+                height += ((simplex_noise_2d(&game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
+                space_scaling_factor *= 2.f;
+                height_intensity /= 3.f;
+            }
+
+            if (block_y <= height) {
+                game_state->test_chunk.data[block_idx] = 1;
+            } else {
+                game_state->test_chunk.data[block_idx] = 0;
+            }
+        }
+
+        VkBufferCreateInfo chunk_vbo_info = {};
+        chunk_vbo_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        chunk_vbo_info.size = MEGABYTES(2);
+        chunk_vbo_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+        VK_ASSERT(vkCreateBuffer(game_state->vk_context.device, &chunk_vbo_info, nullptr, &game_state->test_chunk.vertex_buffer));
+        BuddyAllocationResult chunk_vbo_alloc = buddyAlloc(&game_state->vertex_buffers_allocator.allocator, MEGABYTES(2));
+        ASSERT(chunk_vbo_alloc.size != 0);
+        VK_ASSERT(vkBindBufferMemory(game_state->vk_context.device, game_state->test_chunk.vertex_buffer, game_state->vertex_buffers_allocator.memory, chunk_vbo_alloc.offset));
+
+        game_state->test_chunk.needs_remeshing = true;
+
+        // NOTE: Initialize the staging buffers for the chunk vertex buffers.
+        game_state->staging_memory = debugAllocateDirectGPUMemory(&game_state->vk_context, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, MEGABYTES(2) * ARRAY_COUNT(game_state->staging_buffers));
+        vkMapMemory(game_state->vk_context.device, game_state->staging_memory, 0, MEGABYTES(2) * ARRAY_COUNT(game_state->staging_buffers), 0, (void**)&game_state->staging_memory_mapped);
+
+        for (u32 staging_buffer_idx = 0; staging_buffer_idx < ARRAY_COUNT(game_state->staging_buffers); staging_buffer_idx++) {
+            VkBufferCreateInfo buffer_info = {};
+            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            buffer_info.size = MEGABYTES(2);
+            buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+            VK_ASSERT(vkCreateBuffer(game_state->vk_context.device, &buffer_info, nullptr, &game_state->staging_buffers[staging_buffer_idx]));
+            VK_ASSERT(vkBindBufferMemory(
+                game_state->vk_context.device,
+                game_state->staging_buffers[staging_buffer_idx],
+                game_state->staging_memory,
+                staging_buffer_idx * MEGABYTES(2)
+            ));
+        }
 
         //initializeTextRendering(&game_state->d3d_context, &game_state->text_renderer, &game_state->frame_arena);
 
@@ -357,6 +424,47 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     VK_ASSERT(vkBeginCommandBuffer(current_frame.cmd_buffer, &begin_info));
 
+    // NOTE: Rebuild and upload our test chunk vertex buffer if needed.
+    if (game_state->test_chunk.needs_remeshing) {
+        game_state->test_chunk.needs_remeshing = false;
+
+        usize generated_vertices;
+        generateNaiveChunkMesh(
+            &game_state->test_chunk,
+            (ChunkVertex*)game_state->staging_memory_mapped,
+            &generated_vertices
+        );
+
+        game_state->test_chunk.vertices_count = generated_vertices;
+
+        VkBufferCopy copy_region = {};
+        copy_region.srcOffset = 0;
+        copy_region.dstOffset = 0;
+        copy_region.size = generated_vertices * sizeof(ChunkVertex);
+
+        vkCmdCopyBuffer(current_frame.cmd_buffer, game_state->staging_buffers[0], game_state->test_chunk.vertex_buffer, 1, &copy_region);
+
+        // NOTE: Any vertex attributes reading stage after this barrier will have to
+        // wait on copy stages that wrote before the barrier.
+        VkBufferMemoryBarrier2 transfer_barrier = {};
+        transfer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+        transfer_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        transfer_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        transfer_barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+        transfer_barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
+        transfer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_barrier.buffer = game_state->test_chunk.vertex_buffer;
+        transfer_barrier.size = generated_vertices * sizeof(ChunkVertex);
+
+        VkDependencyInfo transfer_barrier_dep_info = {};
+        transfer_barrier_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        transfer_barrier_dep_info.pBufferMemoryBarriers = &transfer_barrier;
+        transfer_barrier_dep_info.bufferMemoryBarrierCount = 1;
+
+        vkCmdPipelineBarrier2(current_frame.cmd_buffer, &transfer_barrier_dep_info);
+    }
+
     // NOTE: Transition the framebuffer into a format suitable for rendering.
     VkImageMemoryBarrier2 render_barrier = {};
     render_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -393,7 +501,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     render_target_info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     render_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     render_target_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    render_target_info.clearValue = {.color = {0.1, 0.1, 0.2, 1.0}};
+    render_target_info.clearValue = {.color = {0.01, 0.01, 0.02, 1.0}};
 
     // TODO: Have a way to get the window dimensions without going to the OS...
     VkRect2D render_area = {};
@@ -461,6 +569,11 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         sizeof(m4),
         &model_mat
     );
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(current_frame.cmd_buffer, 0, 1, &game_state->test_chunk.vertex_buffer, &offset);
+
+    vkCmdDraw(current_frame.cmd_buffer, game_state->test_chunk.vertices_count, 1, 0, 0);
 
     vkCmdEndRendering(current_frame.cmd_buffer);
 

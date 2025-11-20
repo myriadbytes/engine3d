@@ -48,6 +48,10 @@ struct VulkanMemoryAllocator {
 
 b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);
 
+// NOTE: Sometimes you just want a big block
+// of memory that you are not going to sub-allocate.
+VkDeviceMemory debugAllocateDirectGPUMemory(VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, usize size);
+
 VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, Arena* scratch_arena);
 
 struct VulkanPipeline {

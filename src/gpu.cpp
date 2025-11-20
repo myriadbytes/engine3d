@@ -276,6 +276,34 @@ b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* 
     return true;
 }
 
+VkDeviceMemory debugAllocateDirectGPUMemory(VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, usize size) {
+    VkPhysicalDeviceMemoryProperties2 mem_props = {};
+    mem_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    vkGetPhysicalDeviceMemoryProperties2(vk_context->physical_device, &mem_props);
+
+    i32 memory_idx = -1;
+    for (u32 type_idx = 0; type_idx < mem_props.memoryProperties.memoryTypeCount; type_idx++) {
+        VkMemoryType& mem_type = mem_props.memoryProperties.memoryTypes[type_idx];
+        if (mem_type.propertyFlags == memory_properties) {
+            memory_idx = type_idx;
+            break;
+        }
+    }
+    ASSERT(memory_idx != -1);
+
+    // NOTE: Do the actual allocation.
+    VkMemoryAllocateInfo alloc_info = {};
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = size;
+    alloc_info.memoryTypeIndex = memory_idx;
+
+    VkDeviceMemory result;
+    VK_ASSERT(vkAllocateMemory(vk_context->device, &alloc_info, nullptr, &result));
+
+    return result;
+}
+
+
 // TODO: This should handle errors gracefully. Maybe a default shader enbedded in the exe ?
 VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, Arena* scratch_arena) {
     // FIXME : write a function to query the exe's directory instead of forcing a specific CWD

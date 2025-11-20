@@ -53,8 +53,12 @@ constexpr usize CHUNK_POOL_SIZE = (LOAD_RADIUS * 2 + 1)
 struct Chunk {
     v3i chunk_position;
     u8 data[CHUNK_W * CHUNK_W * CHUNK_W];
+
+    b32 needs_remeshing;
     usize vertices_count;
+
     VkBuffer vertex_buffer;
+    usize vertex_buffer_size;
 };
 
 // NOTE: The actual world will modeled using a hashmap that associates world
