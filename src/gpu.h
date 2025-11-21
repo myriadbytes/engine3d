@@ -61,7 +61,26 @@ VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, 
 struct VulkanPipeline {
     VkPipeline pipeline;  
     VkPipelineLayout layout;
+    // WARNING: The simple pipelines we have now
+    // only need one descriptor set, but that
+    // could change.
     VkDescriptorSetLayout desc_set_layout;
 };
 
 void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena);
+
+struct TextRenderingState {
+    b32 is_initialized;
+
+    VulkanPipeline text_pipeline;
+
+    VkImage bitmap_font;
+    VkImageView bitmap_font_view;
+
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet descriptor_set;
+};
+
+b32 initializeTextRenderingState(TextRenderingState* text_rendering_state, VulkanContext* vk_context, VkCommandBuffer cmd_buf, VulkanMemoryAllocator* vram_allocator, u8* staging_buffer_mapped, VkBuffer staging_buffer, Arena* scratch_arena);
+// NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
+void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_row, u32 start_col);

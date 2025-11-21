@@ -13,13 +13,13 @@ layout(location = 0) out vec2 v_uv;
 void main() {
 
     vec2 positions[6] = {
-        vec2(-1.0, -1.0),  // Bottom-left
-        vec2( 1.0,  1.0),  // Top-right
-        vec2(-1.0,  1.0),  // Top-left
+        vec2(-1.0,  1.0),  // Bottom-left
+        vec2( 1.0, -1.0),  // Top-right
+        vec2(-1.0, -1.0),  // Top-left
 
-        vec2(-1.0, -1.0),  // Bottom-left
-        vec2( 1.0, -1.0),  // Bottom-right
-        vec2( 1.0,  1.0),  // Top-right
+        vec2(-1.0,  1.0),  // Bottom-left
+        vec2( 1.0,  1.0),  // Bottom-right
+        vec2( 1.0, -1.0),  // Top-right
     };
 
     // NOTE: Monogram-bitmap.png contains 16x8 chars

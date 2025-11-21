@@ -170,6 +170,8 @@ struct GameState {
     usize projection_matrix_buffers_offsets[FRAMES_IN_FLIGHT];
     VkDescriptorSet matrices_desc_sets[FRAMES_IN_FLIGHT];
 
+    TextRenderingState text_rendering_state;
+
     b32 is_wireframe;
 
     u8 static_arena_memory[MEGABYTES(2)];
@@ -426,6 +428,23 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     VK_ASSERT(vkBeginCommandBuffer(current_frame.cmd_buffer, &begin_info));
 
+    // NOTE: The first time, initialise the text renderer with pipeline creation
+    // and bitmap font texture upload.
+    if (!game_state->text_rendering_state.is_initialized) {
+        initializeTextRenderingState(
+            &game_state->text_rendering_state,
+            &game_state->vk_context,
+            current_frame.cmd_buffer,
+            &game_state->vram_allocator,
+            // FIXME: Staging buffer 0 is gonna be used for the
+            // chunk mesh upload right after, but managing buffers
+            // manually across frames is a nightmare.
+            game_state->staging_memory_mapped + MEGABYTES(2),
+            game_state->staging_buffers[1],
+            &game_state->frame_arena
+        );
+    }
+
     // NOTE: Rebuild and upload our test chunk vertex buffer if needed.
     if (game_state->test_chunk.needs_remeshing) {
         game_state->test_chunk.needs_remeshing = false;
@@ -585,6 +604,21 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     vkCmdBindVertexBuffers(current_frame.cmd_buffer, 0, 1, &game_state->test_chunk.vertex_buffer, &offset);
 
     vkCmdDraw(current_frame.cmd_buffer, game_state->test_chunk.vertices_count, 1, 0, 0);
+
+    // NOTE: Text rendering test.
+    char debug_text_string[256];
+    v3i chunk_position = worldPosToChunk(game_state->player_position);
+    StringCbPrintf(debug_text_string,
+        ARRAY_COUNT(debug_text_string),
+        "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d",
+        game_state->player_position.x,
+        game_state->player_position.y,
+        game_state->player_position.z,
+        chunk_position.x,
+        chunk_position.y,
+        chunk_position.z
+    );
+    drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame.cmd_buffer, debug_text_string, 0, 0);
 
     vkCmdEndRendering(current_frame.cmd_buffer);
 
