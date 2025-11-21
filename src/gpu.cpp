@@ -217,6 +217,55 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
     return true;
 }
 
+b32 initializeDepthTextures(VulkanContext* vk_context, VulkanMemoryAllocator* vram_allocator) {
+    RECT client_rect;
+    GetClientRect(vk_context->window, &client_rect);
+
+    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        VkImage& frame_depth_img = vk_context->frames[frame_idx].depth_img;
+        VkImageView& frame_depth_view = vk_context->frames[frame_idx].depth_view;
+
+        // NOTE: Create the image.
+        VkImageCreateInfo img_info = {};
+        img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_info.imageType = VK_IMAGE_TYPE_2D;
+        img_info.format = VK_FORMAT_D32_SFLOAT;
+        img_info.extent = {(u32)client_rect.right, (u32)client_rect.bottom, 1};
+        img_info.mipLevels = 1;
+        img_info.arrayLayers = 1;
+        img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+        img_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+        VK_ASSERT(vkCreateImage(vk_context->device, &img_info, nullptr, &frame_depth_img));
+
+        // NOTE: Allocate the memory, checking the allocation meets the requirements.
+        VkMemoryRequirements img_memory_reqs;
+        vkGetImageMemoryRequirements(vk_context->device, frame_depth_img, &img_memory_reqs);
+
+        BuddyAllocationResult allocation = buddyAlloc(&vram_allocator->allocator, img_memory_reqs.size);
+        ASSERT(allocation.size >= img_memory_reqs.size);
+        ASSERT(allocation.offset % img_memory_reqs.alignment == 0);
+
+        VK_ASSERT(vkBindImageMemory(vk_context->device, frame_depth_img, vram_allocator->memory, allocation.offset));
+
+        // NOTE: Create the image view for rendering.
+        VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        view_info.image = frame_depth_img;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = VK_FORMAT_D32_SFLOAT;
+        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        view_info.subresourceRange.baseMipLevel = 0;
+        view_info.subresourceRange.levelCount = 1;
+        view_info.subresourceRange.baseArrayLayer = 0;
+        view_info.subresourceRange.layerCount = 1;
+
+        VK_ASSERT(vkCreateImageView(vk_context->device, &view_info, nullptr, &frame_depth_view));
+    }
+
+    return true;
+}
+
 b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size) {
     *gpu_allocator = {};
 
@@ -399,6 +448,9 @@ void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {};
     depth_stencil_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil_info.depthTestEnable = VK_TRUE;
+    depth_stencil_info.depthWriteEnable = VK_TRUE;
+    depth_stencil_info.depthCompareOp = VK_COMPARE_OP_LESS;
 
     VkPipelineColorBlendAttachmentState blend_attachment = {};
     blend_attachment.blendEnable = VK_FALSE;
@@ -455,10 +507,12 @@ void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk
     VK_ASSERT(vkCreatePipelineLayout(vk_context->device, &layout_info, nullptr, &layout));
 
     VkFormat color_attachment_format = VK_FORMAT_B8G8R8A8_SRGB;
+    VkFormat depth_attachment_format = VK_FORMAT_D32_SFLOAT;
     VkPipelineRenderingCreateInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     rendering_info.colorAttachmentCount = 1;
     rendering_info.pColorAttachmentFormats = &color_attachment_format;
+    rendering_info.depthAttachmentFormat = depth_attachment_format;
 
     VkGraphicsPipelineCreateInfo pipeline_info = {};
     pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;

@@ -144,7 +144,7 @@ struct GameState {
     b32 orbit_mode;
 
     // NOTE: Big chunk of VRAM with big subdivision for vertex buffers.
-    VulkanMemoryAllocator vertex_buffers_allocator;
+    VulkanMemoryAllocator vram_allocator;
     // NOTE: Small chunk of host RAM with small subdivision for uniforms like matrices.
     VulkanMemoryAllocator uniforms_allocator;
     u8* uniforms_memory_mapped;
@@ -192,14 +192,15 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->frame_arena.base = game_state->frame_arena_memory;
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
+        // NOTE: Vulkan, allocators, and depth textures initialization.
         ASSERT(initializeVulkan(&game_state->vk_context, true, &game_state->frame_arena));
         ASSERT(initializeGPUAllocator(
-                &game_state->vertex_buffers_allocator,
+                &game_state->vram_allocator,
                 &game_state->vk_context,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                 &game_state->static_arena,
                 KILOBYTES(4),
-                MEGABYTES(2),
+                MEGABYTES(4),
                 MEGABYTES(256)));
         ASSERT(initializeGPUAllocator(
                 &game_state->uniforms_allocator,
@@ -209,6 +210,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                 4,
                 64,
                 KILOBYTES(8)));
+        ASSERT(initializeDepthTextures(&game_state->vk_context, &game_state->vram_allocator));
 
         // hashmapInitialize(&game_state->world, &chunkPositionHash);
         // poolInitialize(&game_state->chunk_pool);
@@ -280,7 +282,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
 
         // NOTE: Initialize the test chunk.
-        v3i test_chunk_pos = {5, 2, 5};
+        v3i test_chunk_pos = {5, 1, 5};
         for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
             u32 block_x = test_chunk_pos.x * CHUNK_W + (block_idx % CHUNK_W);
             u32 block_y = test_chunk_pos.y * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
@@ -311,9 +313,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         chunk_vbo_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
         VK_ASSERT(vkCreateBuffer(game_state->vk_context.device, &chunk_vbo_info, nullptr, &game_state->test_chunk.vertex_buffer));
-        BuddyAllocationResult chunk_vbo_alloc = buddyAlloc(&game_state->vertex_buffers_allocator.allocator, MEGABYTES(2));
+        BuddyAllocationResult chunk_vbo_alloc = buddyAlloc(&game_state->vram_allocator.allocator, MEGABYTES(2));
         ASSERT(chunk_vbo_alloc.size != 0);
-        VK_ASSERT(vkBindBufferMemory(game_state->vk_context.device, game_state->test_chunk.vertex_buffer, game_state->vertex_buffers_allocator.memory, chunk_vbo_alloc.offset));
+        VK_ASSERT(vkBindBufferMemory(game_state->vk_context.device, game_state->test_chunk.vertex_buffer, game_state->vram_allocator.memory, chunk_vbo_alloc.offset));
 
         game_state->test_chunk.needs_remeshing = true;
 
@@ -503,6 +505,14 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     render_target_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     render_target_info.clearValue = {.color = {0.01, 0.01, 0.02, 1.0}};
 
+    VkRenderingAttachmentInfo depth_target_info = {};
+    depth_target_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depth_target_info.imageView = current_frame.depth_view;
+    depth_target_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depth_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_target_info.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_target_info.clearValue = {.depthStencil = {1.0, 0}};
+
     // TODO: Have a way to get the window dimensions without going to the OS...
     VkRect2D render_area = {};
     RECT client_rect;
@@ -514,6 +524,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.pColorAttachments = &render_target_info;
     rendering_info.colorAttachmentCount = 1;
+    rendering_info.pDepthAttachment = &depth_target_info;
     rendering_info.layerCount = 1;
     rendering_info.renderArea = render_area;
 

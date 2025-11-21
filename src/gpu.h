@@ -22,6 +22,9 @@ struct FrameContext {
     VkSemaphore swapchain_semaphore;
     VkSemaphore render_semaphore;
     VkFence render_fence;
+
+    VkImage depth_img;
+    VkImageView depth_view;
 };
 
 struct VulkanContext {
@@ -39,12 +42,13 @@ struct VulkanContext {
     u64 frames_counter;
 };
 
-b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena);
-
 struct VulkanMemoryAllocator {
     BuddyAllocator allocator;    
     VkDeviceMemory memory;    
 };
+
+b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena);
+b32 initializeDepthTextures(VulkanContext* vk_context, VulkanMemoryAllocator* vram_allocator);
 
 b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);
 
