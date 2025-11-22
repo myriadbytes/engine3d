@@ -4,12 +4,75 @@
 #include "world.h"
 #include "img.h"
 
-// TODO: Automatic debug mode based on internal / release build.
-b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_arena) {
-    *to_init = {};
+struct GraphicsMemoryAllocatorConfig {
+    // FIXME: The initialization will look for a memory type with
+    // that EXACT COMBINATION OF FLAGS !! This sounds extremely
+    // not portable with a different GPU from mine and I should
+    // probably instead define vague "types" (VRAM, GPU-visible RAM)
+    // and write a function find the best fit among all the memory
+    // types. I think that's what VMA does ?
+    VkMemoryPropertyFlags memory_properties;
 
-    to_init->frames_counter = 0;
+    usize                 min_alloc_size;
+    usize                 max_alloc_size;
+    usize                 total_size;
+};
 
+b32 graphicsMemoryAllocatorInitialize(GraphicsMemoryAllocator* gpu_allocator, VkPhysicalDevice phys_device, VkDevice device, Arena* metadata_arena, GraphicsMemoryAllocatorConfig* config) {
+    *gpu_allocator = {};
+
+    // NOTE: Find which memory index to use.
+
+    VkPhysicalDeviceMemoryProperties2 mem_props = {};
+    mem_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    vkGetPhysicalDeviceMemoryProperties2(phys_device, &mem_props);
+
+    i32 memory_idx = -1;
+    for (u32 type_idx = 0; type_idx < mem_props.memoryProperties.memoryTypeCount; type_idx++) {
+        VkMemoryType& mem_type = mem_props.memoryProperties.memoryTypes[type_idx];
+
+        #if ENGINE_SLOW
+        char print_buffer[128];
+            StringCbPrintfA(
+                print_buffer,
+                ARRAY_COUNT(print_buffer),
+                "Memory Type #%u: Heap #%u %s%s\n",
+                type_idx,
+                mem_type.heapIndex,
+                mem_type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "| VRAM " : "",
+                mem_type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? "| HOST VISIBLE " : ""
+            );
+            OutputDebugStringA(print_buffer);
+        #endif
+
+        if (mem_type.propertyFlags == config->memory_properties) {
+            memory_idx = type_idx;
+            break;
+        }
+    }
+    ASSERT(memory_idx != -1);
+
+    // NOTE: Do the actual allocation.
+    VkMemoryAllocateInfo alloc_info = {};
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = config->total_size;
+    alloc_info.memoryTypeIndex = memory_idx;
+
+    VK_ASSERT(vkAllocateMemory(device, &alloc_info, nullptr, &gpu_allocator->memory));
+
+    // NOTE: Initialize the buddy allocator that will be used to manage the allocations
+    buddyInitalize(
+        &gpu_allocator->allocator,
+        metadata_arena,
+        config->min_alloc_size,
+        config->max_alloc_size,
+        config->total_size
+    );
+
+    return true;
+}
+
+b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
     // NOTE: Vulkan instance creation.
     VkApplicationInfo app_info = {};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -75,6 +138,10 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
     vkGetDeviceQueue(to_init->device, 0, 0, &to_init->queue);
     ASSERT(to_init->queue);
 
+    return true;
+}
+
+b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
     // NOTE: Surface creation.
     // WARNING: Getting the handles like that is error prone, but it's convenient
     // for now.
@@ -154,12 +221,17 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
     // FIXME: Apparently the driver is allowed to create more images than what we asked for. We should
     // support that eventually.
     ASSERT(swapchain_images_count == FRAMES_IN_FLIGHT);
-    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, to_init->swapchain_images);
+    VkImage swapchain_images[FRAMES_IN_FLIGHT];
+    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, swapchain_images);
 
+    // NOTE: For each frame, associate the VkImage and create the VkImageView.
     for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
+        
+        to_init->frames[frame_idx].swapchain_image = swapchain_images[frame_idx];
+
         VkImageViewCreateInfo swapchain_view_info = {};
         swapchain_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        swapchain_view_info.image = to_init->swapchain_images[frame_idx];
+        swapchain_view_info.image = to_init->frames[frame_idx].swapchain_image;
         swapchain_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         swapchain_view_info.format = VK_FORMAT_B8G8R8A8_SRGB;
         swapchain_view_info.subresourceRange = {
@@ -169,9 +241,13 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
             .baseArrayLayer = 0,
             .layerCount = 1
         };
-        vkCreateImageView(to_init->device, &swapchain_view_info, nullptr, &to_init->swapchain_images_views[frame_idx]);
+        vkCreateImageView(to_init->device, &swapchain_view_info, nullptr, &to_init->frames[frame_idx].swapchain_image_view);
     }
 
+    return true;   
+}
+
+b32 initCmdAndSync(Renderer* to_init) {
     // NOTE: Create the command pool and buffers used by our frames.
     VkCommandPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -204,27 +280,48 @@ b32 initializeVulkan(VulkanContext* to_init, b32 debug_mode, Arena* scratch_aren
         VK_ASSERT(vkCreateSemaphore(to_init->device, &semaphore_info, nullptr, &to_init->frames[frame_idx].render_semaphore));
     }
 
-    // NOTE: Create the descriptor pool for our uniform buffers.
-    VkDescriptorPoolSize uniform_pool_size = {};
-    uniform_pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    uniform_pool_size.descriptorCount = 32;
-    VkDescriptorPoolCreateInfo uniform_pool_info = {};
-    uniform_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    uniform_pool_info.pPoolSizes = &uniform_pool_size;
-    uniform_pool_info.poolSizeCount = 1;
-    uniform_pool_info.maxSets = 8;
-    VK_ASSERT(vkCreateDescriptorPool(to_init->device, &uniform_pool_info, nullptr, &to_init->uniforms_desc_pool));
+    return true;
+}
+
+b32 initAllocation(Renderer* to_init, Arena* static_arena) {
+    GraphicsMemoryAllocatorConfig large_vram_config = {};
+    large_vram_config.memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    large_vram_config.min_alloc_size = KILOBYTES(32);
+    large_vram_config.max_alloc_size = MEGABYTES(4);
+    large_vram_config.total_size = MEGABYTES(256);
+
+    graphicsMemoryAllocatorInitialize(
+        &to_init->vram_allocator,
+        to_init->physical_device,
+        to_init->device,
+        static_arena,
+        &large_vram_config
+    );
+
+    GraphicsMemoryAllocatorConfig small_ram_config = {};
+    small_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    small_ram_config.min_alloc_size = BYTES(4);
+    small_ram_config.max_alloc_size = BYTES(64);
+    small_ram_config.total_size = KILOBYTES(1);
+
+    graphicsMemoryAllocatorInitialize(
+        &to_init->host_allocator,
+        to_init->physical_device,
+        to_init->device,
+        static_arena,
+        &small_ram_config
+    );
 
     return true;
 }
 
-b32 initializeDepthTextures(VulkanContext* vk_context, VulkanMemoryAllocator* vram_allocator) {
+b32 initDepth(Renderer* to_init) {
     RECT client_rect;
-    GetClientRect(vk_context->window, &client_rect);
+    GetClientRect(to_init->window, &client_rect);
 
     for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        VkImage& frame_depth_img = vk_context->frames[frame_idx].depth_img;
-        VkImageView& frame_depth_view = vk_context->frames[frame_idx].depth_view;
+        VkImage& frame_depth_img = to_init->frames[frame_idx].depth_img;
+        VkImageView& frame_depth_view = to_init->frames[frame_idx].depth_view;
 
         // NOTE: Create the image.
         VkImageCreateInfo img_info = {};
@@ -238,17 +335,17 @@ b32 initializeDepthTextures(VulkanContext* vk_context, VulkanMemoryAllocator* vr
         img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
         img_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 
-        VK_ASSERT(vkCreateImage(vk_context->device, &img_info, nullptr, &frame_depth_img));
+        VK_ASSERT(vkCreateImage(to_init->device, &img_info, nullptr, &frame_depth_img));
 
         // NOTE: Allocate the memory, checking the allocation meets the requirements.
         VkMemoryRequirements img_memory_reqs;
-        vkGetImageMemoryRequirements(vk_context->device, frame_depth_img, &img_memory_reqs);
+        vkGetImageMemoryRequirements(to_init->device, frame_depth_img, &img_memory_reqs);
 
-        BuddyAllocationResult allocation = buddyAlloc(&vram_allocator->allocator, img_memory_reqs.size);
+        BuddyAllocationResult allocation = buddyAlloc(&to_init->vram_allocator.allocator, img_memory_reqs.size);
         ASSERT(allocation.size >= img_memory_reqs.size);
         ASSERT(allocation.offset % img_memory_reqs.alignment == 0);
 
-        VK_ASSERT(vkBindImageMemory(vk_context->device, frame_depth_img, vram_allocator->memory, allocation.offset));
+        VK_ASSERT(vkBindImageMemory(to_init->device, frame_depth_img, to_init->vram_allocator.memory, allocation.offset));
 
         // NOTE: Create the image view for rendering.
         VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -261,72 +358,51 @@ b32 initializeDepthTextures(VulkanContext* vk_context, VulkanMemoryAllocator* vr
         view_info.subresourceRange.baseArrayLayer = 0;
         view_info.subresourceRange.layerCount = 1;
 
-        VK_ASSERT(vkCreateImageView(vk_context->device, &view_info, nullptr, &frame_depth_view));
+        VK_ASSERT(vkCreateImageView(to_init->device, &view_info, nullptr, &frame_depth_view));
     }
 
     return true;
 }
 
-b32 initializeGPUAllocator(VulkanMemoryAllocator* gpu_allocator, VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size) {
-    *gpu_allocator = {};
+b32 initDescPool(Renderer* to_init) {
+    constexpr u32 MAX_SETS = 32;
+    constexpr u32 MAX_UNIFORMS = 32;
+    constexpr u32 MAX_IMG_SAMPLERS = 32;
 
-    // NOTE: Find which memory index to use.
+    // NOTE: Create the descriptor pool for:
+    // - uniform buffers
+    // - texture samplers
+    VkDescriptorPoolSize uniform_pool_sizes[2] = {};
+    uniform_pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uniform_pool_sizes[0].descriptorCount = MAX_UNIFORMS;
+    uniform_pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    uniform_pool_sizes[1].descriptorCount = MAX_IMG_SAMPLERS;
 
-    VkPhysicalDeviceMemoryProperties2 mem_props = {};
-    mem_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
-    vkGetPhysicalDeviceMemoryProperties2(vk_context->physical_device, &mem_props);
+    VkDescriptorPoolCreateInfo uniform_pool_info = {};
+    uniform_pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    uniform_pool_info.pPoolSizes = uniform_pool_sizes;
+    uniform_pool_info.poolSizeCount = ARRAY_COUNT(uniform_pool_sizes);
+    uniform_pool_info.maxSets = MAX_SETS;
+    VK_ASSERT(vkCreateDescriptorPool(to_init->device, &uniform_pool_info, nullptr, &to_init->global_desc_pool));
+    
+    return true;
+}
 
-    for (u32 heap_idx = 0; heap_idx < mem_props.memoryProperties.memoryHeapCount; heap_idx++) {
-        char print_buffer[128];
-        VkMemoryHeap& heap = mem_props.memoryProperties.memoryHeaps[heap_idx];
-        StringCbPrintfA(
-            print_buffer,
-            ARRAY_COUNT(print_buffer),
-            "Memory Heap #%u: %llu bytes %s\n",
-            heap_idx,
-            heap.size,
-            heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "(VRAM)" : ""
-        );
-        OutputDebugStringA(print_buffer);
-    }
+// TODO: Automatic debug mode based on internal / release build.
+b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena) {
+    *to_init = {};
 
-    i32 memory_idx = -1;
-    for (u32 type_idx = 0; type_idx < mem_props.memoryProperties.memoryTypeCount; type_idx++) {
-        char print_buffer[128];
-        VkMemoryType& mem_type = mem_props.memoryProperties.memoryTypes[type_idx];
-        StringCbPrintfA(
-            print_buffer,
-            ARRAY_COUNT(print_buffer),
-            "Memory Type #%u: Heap #%u %s%s\n",
-            type_idx,
-            mem_type.heapIndex,
-            mem_type.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "| VRAM " : "",
-            mem_type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? "| HOST VISIBLE " : ""
-        );
-        OutputDebugStringA(print_buffer);
-
-        if (mem_type.propertyFlags == memory_properties) {
-            memory_idx = type_idx;
-            break;
-        }
-    }
-    ASSERT(memory_idx != -1);
-
-    // NOTE: Do the actual allocation.
-    VkMemoryAllocateInfo alloc_info = {};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = total_size;
-    alloc_info.memoryTypeIndex = memory_idx;
-
-    VK_ASSERT(vkAllocateMemory(vk_context->device, &alloc_info, nullptr, &gpu_allocator->memory));
-
-    // NOTE: Initialize the buddy allocator that will be used to manage the allocations
-    buddyInitalize(&gpu_allocator->allocator, metadata_arena, min_alloc_size, max_alloc_size, total_size);
+    ASSERT(initVulkan(to_init, debug_mode, scratch_arena));
+    ASSERT(initSwapchain(to_init, scratch_arena));
+    ASSERT(initCmdAndSync(to_init));
+    ASSERT(initAllocation(to_init, static_arena));
+    ASSERT(initDepth(to_init));
+    ASSERT(initDescPool(to_init));
 
     return true;
 }
 
-VkDeviceMemory debugAllocateDirectGPUMemory(VulkanContext* vk_context, VkMemoryPropertyFlags memory_properties, usize size) {
+VkDeviceMemory debugAllocateDirectGPUMemory(Renderer* vk_context, VkMemoryPropertyFlags memory_properties, usize size) {
     VkPhysicalDeviceMemoryProperties2 mem_props = {};
     mem_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
     vkGetPhysicalDeviceMemoryProperties2(vk_context->physical_device, &mem_props);
@@ -355,7 +431,7 @@ VkDeviceMemory debugAllocateDirectGPUMemory(VulkanContext* vk_context, VkMemoryP
 
 
 // TODO: This should handle errors gracefully. Maybe a default shader enbedded in the exe ?
-VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, Arena* scratch_arena) {
+VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena* scratch_arena) {
     // FIXME : write a function to query the exe's directory instead of forcing a specific CWD
     wchar_t windows_path[128];
     MultiByteToWideChar(CP_UTF8, 0, path, -1, windows_path, ARRAY_COUNT(windows_path));
@@ -387,7 +463,8 @@ VkShaderModule loadAndCreateShader(VulkanContext* vk_context, const char* path, 
     return result;
 }
 
-void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena) {
+/*
+void createChunkRenderPipelines(Renderer* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena) {
     VkShaderModule chunk_vert_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.vert.spv", scratch_arena);
     VkShaderModule chunk_frag_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.frag.spv", scratch_arena);
 
@@ -538,136 +615,31 @@ void createChunkRenderPipelines(VulkanContext* vk_context, VulkanPipeline* chunk
     vkDestroyShaderModule(vk_context->device, chunk_frag_shader, nullptr);
 }
 
-b32 initializeTextRenderingState(TextRenderingState* text_rendering_state, VulkanContext* vk_context, VkCommandBuffer cmd_buf, VulkanMemoryAllocator* vram_allocator, u8* staging_buffer_mapped, VkBuffer staging_buffer, Arena* scratch_arena) {
+b32 initializeTextRenderingState(TextRenderingState* text_rendering_state, Renderer* vk_context, VkCommandBuffer cmd_buf, GraphicsMemoryAllocator* vram_allocator, u8* staging_buffer_mapped, VkBuffer staging_buffer, Arena* scratch_arena) {
     
     // NOTE: Create the pipeline.
     VkShaderModule text_vert_shader = loadAndCreateShader(vk_context, "./shaders/bitmap_text.vert.spv", scratch_arena);
     VkShaderModule text_frag_shader = loadAndCreateShader(vk_context, "./shaders/bitmap_text.frag.spv", scratch_arena);
 
-    VkPipelineShaderStageCreateInfo shader_stages[2] = {};
-    shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    shader_stages[0].module = text_vert_shader;
-    shader_stages[0].pName = "main";
-    shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    shader_stages[1].module = text_frag_shader;
-    shader_stages[1].pName = "main";
+    VulkanPipelineBuilder pipeline_builder = {};
+    pipelineBuilderInitialize(&pipeline_builder, scratch_arena);
 
-    VkPipelineVertexInputStateCreateInfo vertex_input_info = {};
-    vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    pipelineBuilderSetVertexShader(&pipeline_builder, text_vert_shader);
+    pipelineBuilderSetFragmentShader(&pipeline_builder, text_frag_shader);
 
-    VkPipelineInputAssemblyStateCreateInfo assembly_info = {};
-    assembly_info.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    assembly_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipelineBuilderEnableAlphaBlending(&pipeline_builder);
 
-    VkPipelineTessellationStateCreateInfo tesselation_info = {};
-    tesselation_info.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    // NOTE: 1 Sampler for the bitmap font.
+    pipelineBuilderAddImageSampler(&pipeline_builder);
 
-    // NOTE: We will use dynamic state for the viewport.
-    VkPipelineViewportStateCreateInfo viewport_info = {};
-    viewport_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewport_info.viewportCount = 1;
-    viewport_info.scissorCount = 1;
+    // NOTE: 2 push constants:
+    // - transform matrix
+    // - char codepoint
+    pipelineBuilderAddPushConstant(&pipeline_builder, sizeof(m4), VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddPushConstant(&pipeline_builder, sizeof(u32), VK_SHADER_STAGE_VERTEX_BIT);
 
-    VkPipelineRasterizationStateCreateInfo raster_info = {};
-    raster_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    raster_info.polygonMode = VK_POLYGON_MODE_FILL;
-    raster_info.cullMode = VK_CULL_MODE_BACK_BIT;
-    raster_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raster_info.lineWidth = 1.0f;
+    pipelineBuilderCreatePipeline(&pipeline_builder, &text_rendering_state->text_pipeline);
 
-    VkPipelineMultisampleStateCreateInfo multisample_info = {};
-    multisample_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {};
-    depth_stencil_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_stencil_info.depthTestEnable = VK_FALSE;
-    depth_stencil_info.depthWriteEnable = VK_FALSE;
-
-    VkPipelineColorBlendAttachmentState blend_attachment = {};
-    blend_attachment.blendEnable = VK_TRUE;
-    blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-    blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
-    blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-    blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-    blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
-    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT
-                                      | VK_COLOR_COMPONENT_G_BIT
-                                      | VK_COLOR_COMPONENT_B_BIT
-                                      | VK_COLOR_COMPONENT_A_BIT;
-
-    VkPipelineColorBlendStateCreateInfo blend_info = {};
-    blend_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend_info.logicOpEnable = VK_FALSE;
-    blend_info.logicOp = VK_LOGIC_OP_COPY;
-    blend_info.pAttachments = &blend_attachment;
-    blend_info.attachmentCount = 1;
-
-    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
-    dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamic_state_info.pDynamicStates = dynamic_states;
-    dynamic_state_info.dynamicStateCount = ARRAY_COUNT(dynamic_states);
-
-    // NOTE: 1 combined image/sampler for the bitmap font.
-    VkDescriptorSetLayoutBinding shader_bindings[1] = {};
-    shader_bindings[0].binding = 0;
-    shader_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    shader_bindings[0].descriptorCount = 1;
-    shader_bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    VkDescriptorSetLayoutCreateInfo set_info = {};
-    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    set_info.pBindings = shader_bindings;
-    set_info.bindingCount = ARRAY_COUNT(shader_bindings);
-
-    VK_ASSERT(vkCreateDescriptorSetLayout(vk_context->device, &set_info, nullptr, &text_rendering_state->text_pipeline.desc_set_layout));
-
-    // NOTE: 1 push constant for the matrix + char codepoint.
-    VkPushConstantRange push_constants[1] = {};
-    push_constants[0].offset = 0;
-    push_constants[0].size = sizeof(m4) + sizeof(u32);
-    push_constants[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-    VkPipelineLayoutCreateInfo layout_info = {};
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.pSetLayouts = &text_rendering_state->text_pipeline.desc_set_layout;
-    layout_info.setLayoutCount = 1;
-    layout_info.pPushConstantRanges = push_constants;
-    layout_info.pushConstantRangeCount = ARRAY_COUNT(push_constants);
-
-    VkPipelineLayout pipeline_layout;
-    VK_ASSERT(vkCreatePipelineLayout(vk_context->device, &layout_info, nullptr, &pipeline_layout));
-
-    VkFormat color_attachment_format = VK_FORMAT_B8G8R8A8_SRGB;
-    VkFormat depth_attachment_format = VK_FORMAT_D32_SFLOAT;
-    VkPipelineRenderingCreateInfo rendering_info = {};
-    rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering_info.colorAttachmentCount = 1;
-    rendering_info.pColorAttachmentFormats = &color_attachment_format;
-    rendering_info.depthAttachmentFormat = depth_attachment_format;
-
-    VkGraphicsPipelineCreateInfo pipeline_info = {};
-    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipeline_info.pNext = &rendering_info;
-    pipeline_info.pStages = shader_stages;
-    pipeline_info.stageCount = ARRAY_COUNT(shader_stages);
-    pipeline_info.pVertexInputState = &vertex_input_info;
-    pipeline_info.pInputAssemblyState = &assembly_info;
-    pipeline_info.pTessellationState = &tesselation_info;
-    pipeline_info.pViewportState = &viewport_info;
-    pipeline_info.pRasterizationState = &raster_info;
-    pipeline_info.pMultisampleState = &multisample_info;
-    pipeline_info.pDepthStencilState = &depth_stencil_info;
-    pipeline_info.pColorBlendState = &blend_info;
-    pipeline_info.pDynamicState = &dynamic_state_info;
-    pipeline_info.layout = pipeline_layout;
-
-    text_rendering_state->text_pipeline.layout = pipeline_layout;
-    VK_ASSERT(vkCreateGraphicsPipelines(vk_context->device, nullptr, 1, &pipeline_info, nullptr, &text_rendering_state->text_pipeline.pipeline));
 
     vkDestroyShaderModule(vk_context->device, text_vert_shader, nullptr);
     vkDestroyShaderModule(vk_context->device, text_frag_shader, nullptr);
@@ -896,4 +868,183 @@ void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBu
         vkCmdPushConstants(cmd_buf, text_rendering_state->text_pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(TextShaderPushConstants), &push_constants);
         vkCmdDraw(cmd_buf, 6, 1, 0, 0);
     }
+}
+*/
+
+constexpr u32 BUILDER_VRTX_STAGE_ID = 0;
+constexpr u32 BUILDER_FRAG_STAGE_ID = 1;
+
+void pipelineBuilderInitialize(VulkanPipelineBuilder* builder) {
+    *builder = {};
+
+    // FIXME: Have a default shader here to prevent crashes
+    // on bad pipeline creation.
+    builder->shader_stages[BUILDER_VRTX_STAGE_ID].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    builder->shader_stages[BUILDER_VRTX_STAGE_ID].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    builder->shader_stages[BUILDER_VRTX_STAGE_ID].module = nullptr;
+    builder->shader_stages[BUILDER_VRTX_STAGE_ID].pName = "main";
+    builder->shader_stages[BUILDER_FRAG_STAGE_ID].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    builder->shader_stages[BUILDER_FRAG_STAGE_ID].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    builder->shader_stages[BUILDER_FRAG_STAGE_ID].module = nullptr;
+    builder->shader_stages[BUILDER_FRAG_STAGE_ID].pName = "main";
+
+    // NOTE: Would be extended by adding vertex buffer / attribute info.
+    builder->input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    // NOTE: Defaults to triangle list.
+    builder->assembly_info.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    builder->assembly_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    // NOTE: Will never be used.
+    builder->tessellation_info.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+
+    // NOTE: All pipelines will use dynamic state for the viewport and scissor.
+    builder->viewport_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    builder->viewport_info.viewportCount = 1;
+    builder->viewport_info.scissorCount = 1;
+
+    // NOTE: Defaults to:
+    // - No culling
+    // - Fill mode.
+    builder->raster_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    builder->raster_info.polygonMode = VK_POLYGON_MODE_FILL;
+    builder->raster_info.cullMode = VK_CULL_MODE_NONE;
+    builder->raster_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    builder->raster_info.lineWidth = 1.0f;
+
+    // NOTE: Not used.
+    builder->multisample_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    builder->multisample_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // NOTE: Defaults to no depth testing.
+    builder->depth_stencil_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    builder->depth_stencil_info.depthTestEnable = VK_FALSE;
+    builder->depth_stencil_info.depthWriteEnable = VK_FALSE;
+    builder->depth_stencil_info.stencilTestEnable = VK_FALSE;
+
+    // NOTE: Defaults to no blending.
+    builder->blend_attachments[0].blendEnable = VK_FALSE;
+    builder->blend_attachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT
+                                                  | VK_COLOR_COMPONENT_G_BIT
+                                                  | VK_COLOR_COMPONENT_B_BIT
+                                                  | VK_COLOR_COMPONENT_A_BIT;
+
+    builder->blend_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    builder->blend_info.logicOpEnable = VK_FALSE;
+    builder->blend_info.logicOp = VK_LOGIC_OP_COPY;
+    builder->blend_info.pAttachments = builder->blend_attachments;
+    builder->blend_info.attachmentCount = 1;
+
+    // NOTE: Viewport and scissor is dynamic for all pipelines.
+    builder->dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
+    builder->dynamic_states[1] = VK_DYNAMIC_STATE_SCISSOR;
+
+    builder->dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    builder->dynamic_state_info.pDynamicStates = builder->dynamic_states;
+    builder->dynamic_state_info.dynamicStateCount = ARRAY_COUNT(builder->dynamic_states);
+
+    // NOTE: Defaults to those values. Maybe it should be more flexible
+    // because I have no idea if they are supported on all GPUs. But this
+    // is an engine-wide issue, not just for this builder.
+    builder->color_attachment_format = VK_FORMAT_B8G8R8A8_SRGB;
+    builder->depth_attachment_format = VK_FORMAT_D32_SFLOAT;
+
+    builder->rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    builder->rendering_info.colorAttachmentCount = 1;
+    builder->rendering_info.pColorAttachmentFormats = &builder->color_attachment_format;
+    builder->rendering_info.depthAttachmentFormat = builder->depth_attachment_format;
+
+    // NOTE: Just set the sType, everything else will be handled during creation.
+    for (u32 set_idx = 0; set_idx < PIPELINES_MAX_SETS; set_idx++) {
+        builder->sets_info[set_idx].sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    }
+}
+
+void pipelineBuilderSetVertexShader(VulkanPipelineBuilder* builder, VkShaderModule shader) {
+    ASSERT(shader != nullptr);
+
+    builder->shader_stages[BUILDER_VRTX_STAGE_ID].module = shader;
+}
+
+void pipelineBuilderSetFragmentShader(VulkanPipelineBuilder* builder, VkShaderModule shader) {
+    ASSERT(shader != nullptr);
+
+    builder->shader_stages[BUILDER_FRAG_STAGE_ID].module = shader;
+}
+
+void pipelineBuilderEnableAlphaBlending(VulkanPipelineBuilder* builder) {
+    builder->blend_attachments[0].blendEnable = VK_TRUE;
+    builder->blend_attachments[0].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    builder->blend_attachments[0].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    builder->blend_attachments[0].colorBlendOp = VK_BLEND_OP_ADD;
+    builder->blend_attachments[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    builder->blend_attachments[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    builder->blend_attachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
+}
+
+void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder) {
+    ASSERT(builder->current_binding < BUILDER_MAX_DESC_PER_SET);
+
+    u32 binding_idx = builder->current_set * BUILDER_MAX_DESC_PER_SET + builder->current_binding;
+
+    builder->shader_bindings[binding_idx].binding = builder->current_binding;
+    builder->shader_bindings[binding_idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    builder->shader_bindings[binding_idx].descriptorCount = 1;
+    // NOTE: Assume that samplers will only be sampled from in fragment shaders for now.
+    builder->shader_bindings[binding_idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    builder->sets_bindings_count[builder->current_set]++;
+    builder->current_binding++;
+
+}
+
+void pipelineBuilderAddPushConstant(VulkanPipelineBuilder* builder, usize size, VkShaderStageFlags stages) {
+    // TODO: We would need two ranges if both the vertex and fragment
+    // shader have push constants. For now we just assert that all push
+    // constants have the same stage flags.
+    ASSERT(!builder->push_constants.stageFlags || (builder->push_constants.stageFlags == stages));
+
+    builder->push_constants.offset = 0;
+    builder->push_constants.size += size;
+    builder->push_constants.stageFlags = stages;
+}
+
+void pipelineBuilderCreatePipeline(VulkanPipelineBuilder* builder, VkDevice device, VulkanPipeline* to_create) {
+    *to_create = {};
+
+    // NOTE: Set up all the descriptor sets and create their layouts.
+    for (u32 set_idx = 0; set_idx <= builder->current_set; set_idx++) {
+        builder->sets_info[set_idx].pBindings = &builder->shader_bindings[set_idx*BUILDER_MAX_DESC_PER_SET];
+        builder->sets_info[set_idx].bindingCount = builder->sets_bindings_count[set_idx];
+
+        VK_ASSERT(vkCreateDescriptorSetLayout(device, &builder->sets_info[set_idx], nullptr, &to_create->desc_sets_layouts[set_idx]));
+    }
+    
+    // NOTE: Create the pipeline layout.
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {};
+    pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_info.pSetLayouts = to_create->desc_sets_layouts;
+    pipeline_layout_info.setLayoutCount = builder->current_set+1;
+    pipeline_layout_info.pPushConstantRanges = &builder->push_constants;
+    pipeline_layout_info.pushConstantRangeCount = 1;
+
+    VK_ASSERT(vkCreatePipelineLayout(device, &pipeline_layout_info, nullptr, &to_create->layout));
+
+    VkGraphicsPipelineCreateInfo pipeline_info = {};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.pNext = &builder->rendering_info;
+    pipeline_info.pStages = builder->shader_stages;
+    pipeline_info.stageCount = ARRAY_COUNT(builder->shader_stages);
+    pipeline_info.pVertexInputState = &builder->input_info;
+    pipeline_info.pInputAssemblyState = &builder->assembly_info;
+    pipeline_info.pTessellationState = &builder->tessellation_info;
+    pipeline_info.pViewportState = &builder->viewport_info;
+    pipeline_info.pRasterizationState = &builder->raster_info;
+    pipeline_info.pMultisampleState = &builder->multisample_info;
+    pipeline_info.pDepthStencilState = &builder->depth_stencil_info;
+    pipeline_info.pColorBlendState = &builder->blend_info;
+    pipeline_info.pDynamicState = &builder->dynamic_state_info;
+    pipeline_info.layout = to_create->layout;
+
+    VK_ASSERT(vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_info, nullptr, &to_create->pipeline));
 }

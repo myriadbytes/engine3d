@@ -86,3 +86,17 @@ struct ChunkVertex {
     v3 position;
     v3 normal;
 };
+
+// NOTE: ChatGPT wrote that. I hope it's a good hash.
+// It uses prime numbers so you know it must be.
+inline usize chunkPositionHash(v3i chunk_position) {
+    usize hash = 0;
+    hash ^= (usize)(chunk_position.x * 73856093);
+    hash ^= (usize)(chunk_position.y * 19349663);
+    hash ^= (usize)(chunk_position.z * 83492791);
+    return hash;
+}
+
+
+// TODO: Look into switching to greedy meshing.
+void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);

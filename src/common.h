@@ -33,6 +33,7 @@ typedef int32_t b32;
     #define ASSERT(expr) {}
 #endif
 
+#define BYTES(value)     (value)
 #define KILOBYTES(value) (value * 1024LL)
 #define MEGABYTES(value) (KILOBYTES(value) * 1024LL)
 #define GIGABYTES(value) (MEGABYTES(value) * 1024LL)
