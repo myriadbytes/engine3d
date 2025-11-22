@@ -17,11 +17,12 @@ constexpr usize FRAMES_IN_FLIGHT = 2;
 constexpr u64 ONE_SECOND_TIMEOUT = 1'000'000'000;
 
 struct GraphicsMemoryAllocator {
+    VkDevice device;
     BuddyAllocator allocator;    
     VkDeviceMemory memory;    
 };
 
-struct FrameContext {
+struct Frame {
     VkCommandPool cmd_pool;
     VkCommandBuffer cmd_buffer;
 
@@ -35,6 +36,16 @@ struct FrameContext {
     VkImageView depth_view;
 };
 
+struct StagingBuffer {
+    VkBuffer buffer;
+    usize buffer_size;
+    u8* mapped_data;
+};
+
+constexpr u32 STAGING_BUFFERS_PER_FRAME = 16;
+// NOTE: The size of the worst case chunk mesh for now.
+constexpr u32 STAGING_BUFFER_MIN_SIZE = MEGABYTES(2);
+
 struct Renderer {
     HWND window;
     VkInstance instance;
@@ -44,26 +55,44 @@ struct Renderer {
     VkQueue queue;
     VkSwapchainKHR swapchain;
 
-    FrameContext frames[FRAMES_IN_FLIGHT];
+    Frame frames[FRAMES_IN_FLIGHT];
     u64 frames_counter;
 
-    // NOTE: Big chunk of VRAM with big subdivision for things like
+    // NOTE: VRAM with big subdivision for things like
     // vertex buffers or render targets.
     GraphicsMemoryAllocator vram_allocator;
-    // NOTE: Small chunk of (GPU-visible) host RAM with small
-    // subdivision for uniform buffers (e.g. matrices).
+    // NOTE: GPU-visible host RAM with small subdivision
+    // for uniform buffers (e.g. matrices).
     GraphicsMemoryAllocator host_allocator;
+
+    // NOTE: GPU-visible host RAM with big subdivisions,
+    // for our staging buffers. We don't actually need
+    // an allocator because they are currently fixed size
+    // and allocated once at startup, but it's easier to
+    // reuse the abstractions I already wrote.
+    GraphicsMemoryAllocator staging_allocator;
+
+    // NOTE: There is number of staging buffers per frame for uploads.
+    // I think it's better to separate per frames so you don't use a staging
+    // buffer that's being copied from during the execution of frame A's
+    // commands while you are recording frame B's commands.
+    StagingBuffer staging_buffers[FRAMES_IN_FLIGHT*STAGING_BUFFERS_PER_FRAME];
+    u32 distributed_staging_buffers;
 
     VkDescriptorPool global_desc_pool;
 };
 
 b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena);
-
-// NOTE: Sometimes you just want a big block
-// of memory that you are not going to sub-allocate.
-VkDeviceMemory debugAllocateDirectGPUMemory(Renderer* vk_context, VkMemoryPropertyFlags memory_properties, usize size);
+// NOTE: Returns NULL if no more staging buffers available for this frame.
+StagingBuffer* rendererRequestStagingBuffer(Renderer* renderer);
 
 VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena* scratch_arena);
+
+struct GraphicsMemoryImageAllocation {
+    VkImage image;  
+    VkImageView image_view;
+};
+GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage);
 
 // NOTE: The simple pipelines we have now
 // only need one descriptor set, but that
@@ -131,9 +160,3 @@ void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder);
 void pipelineBuilderAddPushConstant(VulkanPipelineBuilder* builder, usize size, VkShaderStageFlags stages);
 
 void pipelineBuilderCreatePipeline(VulkanPipelineBuilder* builder, VkDevice device, VulkanPipeline* to_create);
-
-
-void createChunkRenderPipelines(Renderer* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena);
-
-// NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
-// void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_row, u32 start_col);

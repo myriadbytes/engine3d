@@ -5,6 +5,7 @@
 
 #include "common.h"
 #include "containers.h"
+#include "img.h"
 #include "game_api.h"
 #include "maths.h"
 #include "noise.h"
@@ -18,10 +19,13 @@ struct TextRenderingState {
 
     VkImage bitmap_font;
     VkImageView bitmap_font_view;
+
+    // NOTE: Contains just a combined image+sampler
+    // for the font texture.
+    VkDescriptorSet descriptor_set;
 };
 
-// WARNING: In the process of being ported to use the cleaned up code.
-void textRenderingInitialize(TextRenderingState* text_rendering_state, Renderer*renderer, Arena* scratch_arena) {
+void textRenderingInitialize(TextRenderingState* text_rendering_state, Renderer* renderer, Arena* scratch_arena) {
     // NOTE: Create the pipeline.
     VkShaderModule text_vert_shader = loadAndCreateShader(renderer, "./shaders/bitmap_text.vert.spv", scratch_arena);
     VkShaderModule text_frag_shader = loadAndCreateShader(renderer, "./shaders/bitmap_text.frag.spv", scratch_arena);
@@ -45,7 +49,209 @@ void textRenderingInitialize(TextRenderingState* text_rendering_state, Renderer*
 
     pipelineBuilderCreatePipeline(&pipeline_builder, renderer->device, &text_rendering_state->text_pipeline);
 
+    vkDestroyShaderModule(renderer->device, text_vert_shader, nullptr);
+    vkDestroyShaderModule(renderer->device, text_frag_shader, nullptr);
+
+    // NOTE: Read the bitmap font png, and create a texture handle for it.
+    u32 bitmap_width, bitmap_height;
+    u8* bitmap_bytes = read_image("./assets/monogram-bitmap.png", &bitmap_width, &bitmap_height, scratch_arena, scratch_arena);
+
+    auto image_allocation = graphicsMemoryAllocateImage(
+        &renderer->vram_allocator,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        bitmap_width,
+        bitmap_height,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+     );
+
+    text_rendering_state->bitmap_font = image_allocation.image;
+    text_rendering_state->bitmap_font_view = image_allocation.image_view;
+
+    // NOTE: Get a staging buffer, and write the image bytes to it.
+    StagingBuffer* staging_buffer = rendererRequestStagingBuffer(renderer);
+    ASSERT(staging_buffer != nullptr);
+    ASSERT(staging_buffer->buffer_size >= bitmap_width * bitmap_height * 4);
+
+    for (u32 i = 0; i < bitmap_width * bitmap_height * 4; i++) {
+        staging_buffer->mapped_data[i] = bitmap_bytes[i];
+    }
+
+    // NOTE: Get the current frame's command buffer to record an upload
+    // for the bitmap font image. The command buffer better be ready to
+    // record, otherwise this will crash ! This will be solved once we
+    // have an upload queue (the data structure, not necessarily the
+    // Vulkan thing).
+    VkCommandBuffer& cmd_buf = renderer->frames[renderer->frames_counter % FRAMES_IN_FLIGHT].cmd_buffer;
+
+    // NOTE: Transition the image into a layout optimal for transfer.
+    // There is nothing to wait on for the first synchronization scope,
+    // and the operations that need to wait on the transition are the
+    // transfer write when we're going to upload the image.
+    VkImageMemoryBarrier2 transfer_dst_barrier = {};
+    transfer_dst_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    transfer_dst_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+    transfer_dst_barrier.srcAccessMask = VK_ACCESS_2_NONE;
+    transfer_dst_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT_KHR;
+    transfer_dst_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR;
+    transfer_dst_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    transfer_dst_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    transfer_dst_barrier.subresourceRange = VkImageSubresourceRange {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    transfer_dst_barrier.image = text_rendering_state->bitmap_font;
+
+    VkDependencyInfo transfer_dst_dep_info = {};
+    transfer_dst_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    transfer_dst_dep_info.imageMemoryBarrierCount = 1;
+    transfer_dst_dep_info.pImageMemoryBarriers = &transfer_dst_barrier;
+
+    vkCmdPipelineBarrier2(cmd_buf, &transfer_dst_dep_info);
+
+    // NOTE: Record the actual copy command.
+    VkBufferImageCopy copy_region = {};
+    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.baseArrayLayer = 0;
+    copy_region.imageSubresource.layerCount = 1;
+    copy_region.imageSubresource.mipLevel = 0;
+    copy_region.imageExtent = {bitmap_width, bitmap_height, 1};
+
+    vkCmdCopyBufferToImage(cmd_buf, staging_buffer->buffer, text_rendering_state->bitmap_font, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+
+    // NOTE: Transition the image into a layout optimal for sampling.
+    // We wait for the transfer to have finished before transitioning,
+    // and any shader read of that image has to wait for the transition.
+    VkImageMemoryBarrier2 shader_read_barrier = {};
+    shader_read_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    shader_read_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT_KHR;
+    shader_read_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR;
+    shader_read_barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    shader_read_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+    shader_read_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    shader_read_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    shader_read_barrier.subresourceRange = VkImageSubresourceRange {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    shader_read_barrier.image = text_rendering_state->bitmap_font;
+
+    VkDependencyInfo shader_read_dep_info = {};
+    shader_read_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    shader_read_dep_info.imageMemoryBarrierCount = 1;
+    shader_read_dep_info.pImageMemoryBarriers = &shader_read_barrier;
+
+    vkCmdPipelineBarrier2(cmd_buf, &shader_read_dep_info);
+
+    // NOTE: Now we need to allocate a descriptor set for the texture.
+    // There's only one and it is constant tho, so this won't be that
+    // much of a bother.
+
+    VkDescriptorSetAllocateInfo set_alloc_info = {};
+    set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set_alloc_info.descriptorPool = renderer->global_desc_pool;
+    set_alloc_info.pSetLayouts = text_rendering_state->text_pipeline.desc_sets_layouts;
+    set_alloc_info.descriptorSetCount = 1;
+    VK_ASSERT(vkAllocateDescriptorSets(renderer->device, &set_alloc_info, &text_rendering_state->descriptor_set));
+
+    // NOTE: Write the sampler + image to the descriptor set. This only needs
+    // to happen once since the things that change at runtime are push constants.
+    VkSamplerCreateInfo sampler_info = {};
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_NEAREST;
+    sampler_info.minFilter = VK_FILTER_NEAREST;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+    VkSampler font_sampler; // WARNING: The sampler is leaked after this function !
+    VK_ASSERT(vkCreateSampler(renderer->device, &sampler_info, nullptr, &font_sampler));
+
+    VkDescriptorImageInfo desc_image_info = {};
+    desc_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    desc_image_info.imageView = text_rendering_state->bitmap_font_view;
+    desc_image_info.sampler = font_sampler;
+
+    VkWriteDescriptorSet desc_write = {};
+    desc_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    desc_write.dstSet = text_rendering_state->descriptor_set;
+    desc_write.dstBinding = 0;
+    desc_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    desc_write.descriptorCount = 1;
+    desc_write.pImageInfo = &desc_image_info;
+
+    vkUpdateDescriptorSets(renderer->device, 1, &desc_write, 0, nullptr);
+
     text_rendering_state->is_initialized = true;
+}
+
+struct TextShaderPushConstants {
+    m4 transform;
+    u32 char_codepoint;
+};
+
+// TODO: Switch away from null-terminated strings.
+// NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
+void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_row, u32 start_col) {
+
+    // NOTE: Set up the pipeline.
+    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.pipeline);
+    vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.layout, 0, 1, &text_rendering_state->descriptor_set, 0, 0);
+
+    // NOTE: https://datagoblin.itch.io/monogram
+    // The bitmap font is 96x96 and has 16x8 chars, so the individual
+    // characters are 6x12.
+    // The vertical layout is :
+    // - 2px ascender on some chars
+    // - 5px for all chars
+    // - 2px descender on some chars
+    // - 3px padding on the bottom
+    // And the horizontal layout is :
+    // - 1px padding on the left
+    // - 5px for all chars
+    // So when laying out chars on a grid, there is already a horizontal
+    // space between them because of the 1px left padding, and a big line
+    // space of 3 pixels. Most chars are also vertically centered, due to the
+    // ascender/descender pair.
+    constexpr f32 char_ratio = 6.f / 12.f;
+    constexpr f32 char_scale = 0.04f; // TODO: Make this configurable ?
+    constexpr f32 char_width = (char_ratio * char_scale) * 2;
+    constexpr f32 char_height = (char_scale) * 2;
+
+    // NOTE: The shader produce a quad that covers the whole screen.
+    // We need to make it a quad of the right proportions and
+    // located in the first slot.
+    m4 quad_setup_matrix =
+        makeTranslation((f32)start_col * char_width, (f32)start_row * char_height, 0)
+        * makeTranslation(-(1 - char_width), -1 + char_height / 2, 0)
+        * makeScale(char_width/2, char_height/2, 0);
+
+    i32 row = start_row;
+    i32 col = start_col;
+    for (int char_i = 0; text[char_i] != 0; char_i++) {
+        u32 char_ascii_codepoint = (u32)text[char_i];
+        if (char_ascii_codepoint == '\n') {
+            row = start_row;
+            col++;
+            continue;
+        }
+
+        m4 char_translate = makeTranslation((f32)row * char_width, (f32)col * char_height , 0);
+        m4 char_matrix = char_translate * quad_setup_matrix;
+
+        // TODO: Implement text wrapping here.
+        row++;
+
+        TextShaderPushConstants push_constants = {};
+        push_constants.transform = char_matrix;
+        push_constants.char_codepoint = char_ascii_codepoint;
+
+        vkCmdPushConstants(cmd_buf, text_rendering_state->text_pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(TextShaderPushConstants), &push_constants);
+        vkCmdDraw(cmd_buf, 6, 1, 0, 0);
+    }
 }
 
 struct GameState {
@@ -307,7 +513,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     // RENDERING
 
     // NOTE: Wait until the work previously submitted by the frame is done.
-    FrameContext& current_frame = game_state->renderer.frames[game_state->renderer.frames_counter % FRAMES_IN_FLIGHT];
+    Frame& current_frame = game_state->renderer.frames[game_state->renderer.frames_counter % FRAMES_IN_FLIGHT];
     VK_ASSERT(vkWaitForFences(game_state->renderer.device, 1, &current_frame.render_fence, true, ONE_SECOND_TIMEOUT));
     VK_ASSERT(vkResetFences(game_state->renderer.device, 1, &current_frame.render_fence));
 
@@ -315,6 +521,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     u32 swapchain_img_idx;
     VK_ASSERT(vkAcquireNextImageKHR(game_state->renderer.device, game_state->renderer.swapchain, ONE_SECOND_TIMEOUT, current_frame.swapchain_semaphore, nullptr, &swapchain_img_idx));
     ASSERT(swapchain_img_idx == (game_state->renderer.frames_counter % FRAMES_IN_FLIGHT));
+
+    // TODO: This needs to be put somewhere else.
+    game_state->renderer.distributed_staging_buffers = 0;
 
     // NOTE: Begin using the command buffer, specifying that we will only be
     // submitting once before resetting it (because the render commands needed
@@ -338,18 +547,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         textRenderingInitialize(
             &game_state->text_rendering_state,
             &game_state->renderer,
-            &game_state->frame_arena);
-        // initializeTextRenderingState(
-        //     &game_state->text_rendering_state,
-        //     &game_state->renderer,
-        //     current_frame.cmd_buffer,
-        //     // FIXME: Staging buffer 0 is gonna be used for the
-        //     // chunk mesh upload right after, but managing buffers
-        //     // manually across frames is a nightmare.
-        //     game_state->staging_memory_mapped + MEGABYTES(2),
-        //     game_state->staging_buffers[1],
-        //     &game_state->frame_arena
-        // );
+            &game_state->frame_arena
+        );
     }
 
     /*
@@ -458,17 +657,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     vkCmdBeginRendering(current_frame.cmd_buffer, &rendering_info);
 
-    // NOTE: Update the matrices for this frame.
-    /*
-    m4* view_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->view_matrix_buffers_offsets[swapchain_img_idx]);
-    m4* projection_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->projection_matrix_buffers_offsets[swapchain_img_idx]);
-
-    *view_mat = lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
-    *projection_mat = makeProjection(0.1, 1000, 90);
-
-    // NOTE: Bind the pipeline, set the dynamic state and bind the
-    // descriptor set for the frame-constant matrices.
-    vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
+    // NOTE: Set the dynamic state shared by all draw commands.
 
     VkViewport viewport = {};
     viewport.x = 0;
@@ -487,6 +676,17 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     scissor.extent.height = client_rect.bottom;
 
     vkCmdSetScissor(current_frame.cmd_buffer, 0, 1, &scissor);
+
+    // NOTE: Update the matrices for this frame.
+    /*
+    m4* view_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->view_matrix_buffers_offsets[swapchain_img_idx]);
+    m4* projection_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->projection_matrix_buffers_offsets[swapchain_img_idx]);
+
+    *view_mat = lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
+    *projection_mat = makeProjection(0.1, 1000, 90);
+
+    // NOTE: Bind the pipeline and the descriptor set for the frame-constant matrices.
+    vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
 
     vkCmdBindDescriptorSets(
         current_frame.cmd_buffer,
@@ -515,6 +715,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     vkCmdDraw(current_frame.cmd_buffer, game_state->test_chunk.vertices_count, 1, 0, 0);
 
+    */
+
     // NOTE: Text rendering test.
     char debug_text_string[256];
     v3i chunk_position = worldPosToChunk(game_state->player_position);
@@ -530,7 +732,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     );
     drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame.cmd_buffer, debug_text_string, 0, 0);
 
-    */
     vkCmdEndRendering(current_frame.cmd_buffer);
 
     // NOTE: Transition the framebuffer into a format suitable for presentation.

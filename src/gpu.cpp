@@ -69,7 +69,94 @@ b32 graphicsMemoryAllocatorInitialize(GraphicsMemoryAllocator* gpu_allocator, Vk
         config->total_size
     );
 
+    gpu_allocator->device = device;
+
     return true;
+}
+
+struct graphicsMemoryBufferAllocation {
+    VkBuffer buffer;    
+    usize buffer_size;
+};
+
+graphicsMemoryBufferAllocation graphicsMemoryAllocateBuffer(GraphicsMemoryAllocator* gpu_allocator, usize desired_size, VkBufferUsageFlags usage) {
+    graphicsMemoryBufferAllocation result = {};
+
+    // NOTE: Allocate the memory.
+    // TODO: Log the difference between the desired size
+    // and the actual allocation size here, to get an idea
+    // of the wasted memory depending on allocator config.
+    BuddyAllocationResult alloc = buddyAlloc(&gpu_allocator->allocator, desired_size);
+    ASSERT(alloc.size >= desired_size);
+
+    result.buffer_size = alloc.size;
+
+    // NOTE: Create the buffer object and check its requirements
+    // against the allocation.
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = desired_size;
+    buffer_info.usage = usage;
+
+    VK_ASSERT(vkCreateBuffer(gpu_allocator->device, &buffer_info, nullptr, &result.buffer));
+
+    VkMemoryRequirements memory_reqs;
+    vkGetBufferMemoryRequirements(gpu_allocator->device, result.buffer, &memory_reqs);
+    ASSERT(alloc.size >= memory_reqs.size);
+    ASSERT(alloc.offset % memory_reqs.alignment == 0);
+    // TODO: Check the memory type bits too.
+
+    // NOTE: Bind the buffer with the memory.
+    VK_ASSERT(vkBindBufferMemory(gpu_allocator->device, result.buffer, gpu_allocator->memory, alloc.offset));
+
+    return result;
+}
+
+GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage) {
+    GraphicsMemoryImageAllocation result = {};
+
+    // NOTE: Create the image.
+    VkImageCreateInfo img_info = {};
+    img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    img_info.imageType = VK_IMAGE_TYPE_2D;
+    img_info.format = img_format;
+    img_info.extent = {img_width, img_height, 1};
+    img_info.mipLevels = 1;
+    img_info.arrayLayers = 1;
+    img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    img_info.usage = usage;
+
+    VK_ASSERT(vkCreateImage(gpu_allocator->device, &img_info, nullptr, &result.image));
+
+    // NOTE: Allocate the memory, checking the allocation meets the requirements.
+    VkMemoryRequirements img_memory_reqs;
+    vkGetImageMemoryRequirements(gpu_allocator->device, result.image, &img_memory_reqs);
+
+    BuddyAllocationResult alloc = buddyAlloc(&gpu_allocator->allocator, img_memory_reqs.size);
+
+    ASSERT(alloc.size >= img_memory_reqs.size);
+    ASSERT(alloc.offset % img_memory_reqs.alignment == 0);
+
+    // NOTE: Bind the image to the allocation.
+    VK_ASSERT(vkBindImageMemory(gpu_allocator->device, result.image, gpu_allocator->memory, alloc.offset));
+
+    // NOTE: Create the image view. The aspect mask is deduced from the format.
+    b32 is_depth_format = (img_format == VK_FORMAT_D32_SFLOAT);
+
+    VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.image = result.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = img_format;
+    view_info.subresourceRange.aspectMask = is_depth_format ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    VK_ASSERT(vkCreateImageView(gpu_allocator->device, &view_info, nullptr, &result.image_view));
+
+    return result;
 }
 
 b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
@@ -312,6 +399,20 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         &small_ram_config
     );
 
+    GraphicsMemoryAllocatorConfig staging_ram_config = {};
+    staging_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    staging_ram_config.min_alloc_size = MEGABYTES(1);
+    staging_ram_config.max_alloc_size = MEGABYTES(8);
+    staging_ram_config.total_size = MEGABYTES(128);
+
+    graphicsMemoryAllocatorInitialize(
+        &to_init->staging_allocator,
+        to_init->physical_device,
+        to_init->device,
+        static_arena,
+        &staging_ram_config
+    );
+
     return true;
 }
 
@@ -388,6 +489,26 @@ b32 initDescPool(Renderer* to_init) {
     return true;
 }
 
+b32 initStaging(Renderer* to_init) {
+    u8* staging_memory_mapped;
+    vkMapMemory(to_init->device, to_init->staging_allocator.memory, 0, STAGING_BUFFERS_PER_FRAME*FRAMES_IN_FLIGHT*STAGING_BUFFER_MIN_SIZE, 0, (void**)&staging_memory_mapped);
+
+    u8* staging_memory_cursor = staging_memory_mapped;
+
+    for (u32 staging_idx = 0; staging_idx < ARRAY_COUNT(to_init->staging_buffers); staging_idx++) {
+        StagingBuffer& staging_buffer = to_init->staging_buffers[staging_idx];
+
+        graphicsMemoryBufferAllocation allocation = graphicsMemoryAllocateBuffer(&to_init->staging_allocator, STAGING_BUFFER_MIN_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);        
+        staging_buffer.buffer = allocation.buffer;
+        staging_buffer.buffer_size = allocation.buffer_size;
+        staging_buffer.mapped_data = staging_memory_cursor;
+
+        staging_memory_cursor += allocation.buffer_size;
+    }
+
+    return true;  
+};
+
 // TODO: Automatic debug mode based on internal / release build.
 b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena) {
     *to_init = {};
@@ -398,8 +519,29 @@ b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, A
     ASSERT(initAllocation(to_init, static_arena));
     ASSERT(initDepth(to_init));
     ASSERT(initDescPool(to_init));
+    ASSERT(initStaging(to_init));
 
     return true;
+}
+
+StagingBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
+    if(renderer->distributed_staging_buffers >= STAGING_BUFFERS_PER_FRAME) {
+        return nullptr;
+    }
+
+    // FIXME: We assume that by the time we get to doing CPU work for
+    // a swapchain image index, its previously submitted work has completed.
+    // This is actually NOT TRUE ! We only call vkWaitForFences when we
+    // begin recording commands, but all CPU work before that might happen
+    // concurrently while the frame's resources are still used by the GPU.
+    // For now, I think I will just try to write to staging buffers only
+    // AFTER that vkWaitForFences call.
+    u32 current_frame = renderer->frames_counter % FRAMES_IN_FLIGHT;
+
+    StagingBuffer* result = &renderer->staging_buffers[current_frame * STAGING_BUFFERS_PER_FRAME + renderer->distributed_staging_buffers];
+    renderer->distributed_staging_buffers++;
+
+    return result;
 }
 
 VkDeviceMemory debugAllocateDirectGPUMemory(Renderer* vk_context, VkMemoryPropertyFlags memory_properties, usize size) {
@@ -613,261 +755,6 @@ void createChunkRenderPipelines(Renderer* vk_context, VulkanPipeline* chunk_pipe
 
     vkDestroyShaderModule(vk_context->device, chunk_vert_shader, nullptr);
     vkDestroyShaderModule(vk_context->device, chunk_frag_shader, nullptr);
-}
-
-b32 initializeTextRenderingState(TextRenderingState* text_rendering_state, Renderer* vk_context, VkCommandBuffer cmd_buf, GraphicsMemoryAllocator* vram_allocator, u8* staging_buffer_mapped, VkBuffer staging_buffer, Arena* scratch_arena) {
-    
-    // NOTE: Create the pipeline.
-    VkShaderModule text_vert_shader = loadAndCreateShader(vk_context, "./shaders/bitmap_text.vert.spv", scratch_arena);
-    VkShaderModule text_frag_shader = loadAndCreateShader(vk_context, "./shaders/bitmap_text.frag.spv", scratch_arena);
-
-    VulkanPipelineBuilder pipeline_builder = {};
-    pipelineBuilderInitialize(&pipeline_builder, scratch_arena);
-
-    pipelineBuilderSetVertexShader(&pipeline_builder, text_vert_shader);
-    pipelineBuilderSetFragmentShader(&pipeline_builder, text_frag_shader);
-
-    pipelineBuilderEnableAlphaBlending(&pipeline_builder);
-
-    // NOTE: 1 Sampler for the bitmap font.
-    pipelineBuilderAddImageSampler(&pipeline_builder);
-
-    // NOTE: 2 push constants:
-    // - transform matrix
-    // - char codepoint
-    pipelineBuilderAddPushConstant(&pipeline_builder, sizeof(m4), VK_SHADER_STAGE_VERTEX_BIT);
-    pipelineBuilderAddPushConstant(&pipeline_builder, sizeof(u32), VK_SHADER_STAGE_VERTEX_BIT);
-
-    pipelineBuilderCreatePipeline(&pipeline_builder, &text_rendering_state->text_pipeline);
-
-
-    vkDestroyShaderModule(vk_context->device, text_vert_shader, nullptr);
-    vkDestroyShaderModule(vk_context->device, text_frag_shader, nullptr);
-
-    // NOTE: Load the bitmap font png.
-    u32 bitmap_width, bitmap_height;
-    u8* image_bytes = read_image("./assets/monogram-bitmap.png", &bitmap_width, &bitmap_height, scratch_arena, scratch_arena);
-
-    // NOTE: Create the texture.
-    VkImageCreateInfo img_info = {};
-    img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    img_info.imageType = VK_IMAGE_TYPE_2D;
-    img_info.format = VK_FORMAT_R8G8B8A8_SRGB;
-    img_info.extent = {bitmap_width, bitmap_height, 1};
-    img_info.mipLevels = 1;
-    img_info.arrayLayers = 1;
-    img_info.samples = VK_SAMPLE_COUNT_1_BIT;
-    img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    img_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-
-    VK_ASSERT(vkCreateImage(vk_context->device, &img_info, nullptr, &text_rendering_state->bitmap_font));
-
-    // NOTE: Allocate the memory, checking the allocation meets the requirements.
-    VkMemoryRequirements img_memory_reqs;
-    vkGetImageMemoryRequirements(vk_context->device, text_rendering_state->bitmap_font, &img_memory_reqs);
-
-    BuddyAllocationResult allocation = buddyAlloc(&vram_allocator->allocator, img_memory_reqs.size);
-    ASSERT(allocation.size >= img_memory_reqs.size);
-    ASSERT(allocation.offset % img_memory_reqs.alignment == 0);
-
-    VK_ASSERT(vkBindImageMemory(vk_context->device, text_rendering_state->bitmap_font, vram_allocator->memory, allocation.offset));
-
-    // NOTE: Create the image view for rendering.
-    VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    view_info.image = text_rendering_state->bitmap_font;
-    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = VK_FORMAT_R8G8B8A8_SRGB;
-    view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    view_info.subresourceRange.baseMipLevel = 0;
-    view_info.subresourceRange.levelCount = 1;
-    view_info.subresourceRange.baseArrayLayer = 0;
-    view_info.subresourceRange.layerCount = 1;
-
-    VK_ASSERT(vkCreateImageView(vk_context->device, &view_info, nullptr, &text_rendering_state->bitmap_font_view));
-
-    // NOTE: Transition the image into a layout optimal for transfer.
-    // There is nothing to wait on for the first synchronization scope,
-    // and the operations that need to wait on the transition are the
-    // transfer write when we're going to upload the image.
-    VkImageMemoryBarrier2 transfer_dst_barrier = {};
-    transfer_dst_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    transfer_dst_barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-    transfer_dst_barrier.srcAccessMask = VK_ACCESS_2_NONE;
-    transfer_dst_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT_KHR;
-    transfer_dst_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR;
-    transfer_dst_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    transfer_dst_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    transfer_dst_barrier.subresourceRange = VkImageSubresourceRange {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-    transfer_dst_barrier.image = text_rendering_state->bitmap_font;
-
-    VkDependencyInfo transfer_dst_dep_info = {};
-    transfer_dst_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    transfer_dst_dep_info.imageMemoryBarrierCount = 1;
-    transfer_dst_dep_info.pImageMemoryBarriers = &transfer_dst_barrier;
-
-    vkCmdPipelineBarrier2(cmd_buf, &transfer_dst_dep_info);
-
-    // NOTE: Upload the image bytes.
-    for (int i = 0; i < bitmap_width * bitmap_height * 4; i++) {
-        staging_buffer_mapped[i] = image_bytes[i];
-    }
-
-    VkBufferImageCopy copy_region = {};
-    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy_region.imageSubresource.baseArrayLayer = 0;
-    copy_region.imageSubresource.layerCount = 1;
-    copy_region.imageSubresource.mipLevel = 0;
-    copy_region.imageExtent = {bitmap_width, bitmap_height, 1};
-
-    vkCmdCopyBufferToImage(cmd_buf, staging_buffer, text_rendering_state->bitmap_font, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
-
-    // NOTE: Transition the image into a layout optimal for sampling.
-    // We wait for the transfer to have finished before transitioning,
-    // and any shader read of that image has to wait for the transition.
-    VkImageMemoryBarrier2 shader_read_barrier = {};
-    shader_read_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    shader_read_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT_KHR;
-    shader_read_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT_KHR;
-    shader_read_barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-    shader_read_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
-    shader_read_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    shader_read_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    shader_read_barrier.subresourceRange = VkImageSubresourceRange {
-        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1,
-    };
-    shader_read_barrier.image = text_rendering_state->bitmap_font;
-
-    VkDependencyInfo shader_read_dep_info = {};
-    shader_read_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-    shader_read_dep_info.imageMemoryBarrierCount = 1;
-    shader_read_dep_info.pImageMemoryBarriers = &shader_read_barrier;
-
-    vkCmdPipelineBarrier2(cmd_buf, &shader_read_dep_info);
-
-    // NOTE: Now we need the descriptor pool, descriptor, and descriptor set.
-    // They're constant tho, so it's not gonna be that much of a bother at runtime.
-    VkDescriptorPoolSize poolSize = {};
-    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 1;
-
-    VkDescriptorPoolCreateInfo poolInfo = {};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    poolInfo.maxSets = 1;
-
-    VK_ASSERT(vkCreateDescriptorPool(vk_context->device, &poolInfo, nullptr, &text_rendering_state->descriptor_pool));
-
-    VkDescriptorSetAllocateInfo set_alloc_info = {};
-    set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    set_alloc_info.descriptorPool = text_rendering_state->descriptor_pool;
-    set_alloc_info.descriptorSetCount = 1;
-    set_alloc_info.pSetLayouts = &text_rendering_state->text_pipeline.desc_set_layout;
-    VK_ASSERT(vkAllocateDescriptorSets(vk_context->device, &set_alloc_info, &text_rendering_state->descriptor_set));
-
-    // NOTE: Write the sampler + image to the descriptor set. This only needs
-    // to happen once since the things that change at runtime are push constants.
-    VkSamplerCreateInfo sampler_info = {};
-    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = VK_FILTER_NEAREST;
-    sampler_info.minFilter = VK_FILTER_NEAREST;
-    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-
-    VkSampler font_sampler; // WARNING: The sampler is leaked after this function !
-    VK_ASSERT(vkCreateSampler(vk_context->device, &sampler_info, nullptr, &font_sampler));
-
-    VkDescriptorImageInfo desc_image_info = {};
-    desc_image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    desc_image_info.imageView = text_rendering_state->bitmap_font_view;
-    desc_image_info.sampler = font_sampler;
-
-    VkWriteDescriptorSet desc_write = {};
-    desc_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    desc_write.dstSet = text_rendering_state->descriptor_set;
-    desc_write.dstBinding = 0;
-    desc_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    desc_write.descriptorCount = 1;
-    desc_write.pImageInfo = &desc_image_info;
-
-    vkUpdateDescriptorSets(vk_context->device, 1, &desc_write, 0, nullptr);
-
-    text_rendering_state->is_initialized = true;
-    return true;
-}
-
-struct TextShaderPushConstants {
-    m4 transform;
-    u32 char_codepoint;
-};
-
-// TODO: Switch away from null-terminated strings.
-void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_row, u32 start_col) {
-
-    // NOTE: Set up the pipeline.
-    vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.pipeline);
-    vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.layout, 0, 1, &text_rendering_state->descriptor_set, 0, 0);
-
-    // NOTE: https://datagoblin.itch.io/monogram
-    // The bitmap font is 96x96 and has 16x8 chars, so the individual
-    // characters are 6x12.
-    // The vertical layout is :
-    // - 2px ascender on some chars
-    // - 5px for all chars
-    // - 2px descender on some chars
-    // - 3px padding on the bottom
-    // And the horizontal layout is :
-    // - 1px padding on the left
-    // - 5px for all chars
-    // So when laying out chars on a grid, there is already a horizontal
-    // space between them because of the 1px left padding, and a big line
-    // space of 3 pixels. Most chars are also vertically centered, due to the
-    // ascender/descender pair.
-    constexpr f32 char_ratio = 6.f / 12.f;
-    constexpr f32 char_scale = 0.04f; // TODO: Make this configurable ?
-    constexpr f32 char_width = (char_ratio * char_scale) * 2;
-    constexpr f32 char_height = (char_scale) * 2;
-
-    // NOTE: The shader produce a quad that covers the whole screen.
-    // We need to make it a quad of the right proportions and
-    // located in the first slot.
-    m4 quad_setup_matrix =
-        makeTranslation((f32)start_col * char_width, (f32)start_row * char_height, 0)
-        * makeTranslation(-(1 - char_width), -1 + char_height / 2, 0)
-        * makeScale(char_width/2, char_height/2, 0);
-
-    i32 row = start_row;
-    i32 col = start_col;
-    for (int char_i = 0; text[char_i] != 0; char_i++) {
-        u32 char_ascii_codepoint = (u32)text[char_i];
-        if (char_ascii_codepoint == '\n') {
-            row = start_row;
-            col++;
-            continue;
-        }
-
-        m4 char_translate = makeTranslation((f32)row * char_width, (f32)col * char_height , 0);
-        m4 char_matrix = char_translate * quad_setup_matrix;
-
-        // TODO: Implement text wrapping here.
-        row++;
-
-        TextShaderPushConstants push_constants = {};
-        push_constants.transform = char_matrix;
-        push_constants.char_codepoint = char_ascii_codepoint;
-
-        vkCmdPushConstants(cmd_buf, text_rendering_state->text_pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(TextShaderPushConstants), &push_constants);
-        vkCmdDraw(cmd_buf, 6, 1, 0, 0);
-    }
 }
 */
 
