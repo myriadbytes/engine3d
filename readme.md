@@ -7,13 +7,17 @@ This repository contains the code for a (C-style) C++ 3D voxel game. The project
 The Windows platform layer uses:
 - Win32 API
 - GameInput
-- D3D12
+- Vulkan
 
-All of which should be available on a stock Windows 10+ install.
+All of which should be available on a stock Windows 10+ install with up-to-date drivers.
 
 ## Why ?
 
 Because it's fun ! Writing a complete codebase is also a great learning exercise.
+Here is a short list of things I have learnt about / implemented from scratch thanks to this project :
+- A PNG loader capable of loading and decompressing simple image assets.
+- A robin-hood hashmap.
+- A buddy allocator for managing VRAM.
 
 ## How to build:
 
@@ -21,7 +25,10 @@ Making everything from scratch also implies not relying on tools like CMake to h
 without dependencies to manage : the build script even generates a `compile_commands.json` file, so you get complete LSP functionality in your favorite
 `clangd`-compatible editor !
 
-Running the `build.py` file should just work, provided you have `clang.exe` on your PATH and the most recent version of the Windows 11 SDK (>= 10.0.26100), due to the GameInput dependency.
+Running the `build.py` file should just work, provided you have:
+- `clang.exe` on your PATH.
+- The most recent version of the Windows 11 SDK (>= 10.0.26100), due to the GameInput dependency.
+- A Vulkan SDK installation.
 
 You can then run `build/win32_game.exe`.
 
@@ -35,7 +42,7 @@ You can then run `build/win32_game.exe`.
 ## Game code hot-reloading:
 
 While the game is running, you can edit the `game.cpp` file and the code will be instantly hot-reloaded by the main executable when you run the build script.
-Since all the memory the game uses is taken from a block allocated at startup, game state will be preserved across reloads.
+Since all the memory the game uses is allocated from the OS by the base executable at startup, game state will be preserved across reloads.
 
 ## Short-term TO-DO list:
 
@@ -47,11 +54,9 @@ Since all the memory the game uses is taken from a block allocated at startup, g
 - [ ] Swapchain resizing
 - [ ] Sound output (WASAPI ?)
 - [ ] Save states (like an emulator)
-- [ ] Looped input recording & playback
 - [ ] "Topmost" window mode (useful to keep the window on top of the editor while hot-reloading)
 - [x] Basic matrix math library
 - [ ] Logging
-- [ ] Thread pool ?? For async asset streaming
 
 ### Game:
 - [x] Basic PNG decoder
