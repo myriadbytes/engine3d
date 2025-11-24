@@ -7,21 +7,21 @@
 
 constexpr i32 CHUNK_W = 16;
 
-inline v3i worldPosToChunk(v3 world_pos) {
+constexpr v3i worldPosToChunk(v3 world_pos) {
     v3 chunk_pos = world_pos / CHUNK_W;
 
     return v3i {
-        mfloor(chunk_pos.x),
-        mfloor(chunk_pos.y),
-        mfloor(chunk_pos.z),
+        mfloor(chunk_pos.x()),
+        mfloor(chunk_pos.y()),
+        mfloor(chunk_pos.z()),
     };
 }
 
-inline v3 chunkToWorldPos(v3i chunk_pos) {
+constexpr v3 chunkToWorldPos(v3i chunk_pos) {
     return v3 {
-        (f32)(chunk_pos.x * CHUNK_W),
-        (f32)(chunk_pos.y * CHUNK_W),
-        (f32)(chunk_pos.z * CHUNK_W)
+        (f32)(chunk_pos.x() * CHUNK_W),
+        (f32)(chunk_pos.y() * CHUNK_W),
+        (f32)(chunk_pos.z() * CHUNK_W)
     };
 }
 
@@ -32,8 +32,8 @@ constexpr i32 LOAD_RADIUS = 5;
 
 // NOTE: We'll allocate a pool of chunks at startup, so that there is no memory
 // allocation for the chunk backing data at runtime. We can affort to do this
-// because it's relatively little data and is constant for every chunk. VRAM
-// and vertex buffers are a very different story : the size is highly variable
+// because the amount of data low and constant for every chunk. On the other hand,
+// vertex buffers (VRAM) are a very different story : the size is highly variable
 // depending on the chunk's geometry and the worst case size (2MB) is much higher
 // than the average (a few KB). Trying to startup-alloc enough VRAM for the loaded
 // world with worst case buffer size would lead to ~10GB of VRAM usage. So I am using
@@ -51,6 +51,8 @@ constexpr usize CHUNK_POOL_SIZE = (LOAD_RADIUS * 2 + 1)
                                 * (LOAD_RADIUS * 2 + 1);
 
 struct Chunk {
+    b32 is_loaded;
+
     v3i chunk_position;
     u8 data[CHUNK_W * CHUNK_W * CHUNK_W];
 
@@ -89,14 +91,13 @@ struct ChunkVertex {
 
 // NOTE: ChatGPT wrote that. I hope it's a good hash.
 // It uses prime numbers so you know it must be.
-inline usize chunkPositionHash(v3i chunk_position) {
+constexpr usize chunkPositionHash(v3i chunk_position) {
     usize hash = 0;
-    hash ^= (usize)(chunk_position.x * 73856093);
-    hash ^= (usize)(chunk_position.y * 19349663);
-    hash ^= (usize)(chunk_position.z * 83492791);
+    hash ^= (usize)(chunk_position.x() * 73856093);
+    hash ^= (usize)(chunk_position.y() * 19349663);
+    hash ^= (usize)(chunk_position.z() * 83492791);
     return hash;
 }
-
 
 // TODO: Look into switching to greedy meshing.
 void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);

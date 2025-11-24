@@ -77,6 +77,7 @@ b32 graphicsMemoryAllocatorInitialize(GraphicsMemoryAllocator* gpu_allocator, Vk
 struct graphicsMemoryBufferAllocation {
     VkBuffer buffer;    
     usize buffer_size;
+    usize memory_offset;
 };
 
 graphicsMemoryBufferAllocation graphicsMemoryAllocateBuffer(GraphicsMemoryAllocator* gpu_allocator, usize desired_size, VkBufferUsageFlags usage) {
@@ -90,6 +91,7 @@ graphicsMemoryBufferAllocation graphicsMemoryAllocateBuffer(GraphicsMemoryAlloca
     ASSERT(alloc.size >= desired_size);
 
     result.buffer_size = alloc.size;
+    result.memory_offset = alloc.offset;
 
     // NOTE: Create the buffer object and check its requirements
     // against the allocation.
@@ -155,6 +157,26 @@ GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocato
     view_info.subresourceRange.layerCount = 1;
 
     VK_ASSERT(vkCreateImageView(gpu_allocator->device, &view_info, nullptr, &result.image_view));
+
+    return result;
+}
+
+SharedBuffer rendererAllocateUniformBuffer(Renderer* renderer, usize uniform_size) {
+    graphicsMemoryBufferAllocation allocation = graphicsMemoryAllocateBuffer(
+        &renderer->host_allocator,
+        uniform_size,
+        VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT
+    );
+
+    // NOTE: Uniforms range from 4 bytes (integer) to 64 bytes (matrices),
+    // so the allocator should be precise enough with such a reduce allocation
+    // range.
+    ASSERT(allocation.buffer_size == uniform_size);
+
+    SharedBuffer result = {};
+    result.buffer = allocation.buffer;
+    result.buffer_size = allocation.buffer_size;
+    result.mapped_data = renderer->host_allocator_mapped + allocation.memory_offset;
 
     return result;
 }
@@ -399,6 +421,8 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         &small_ram_config
     );
 
+    vkMapMemory(to_init->device, to_init->host_allocator.memory, 0, small_ram_config.total_size, 0, (void**)&to_init->host_allocator_mapped);
+
     GraphicsMemoryAllocatorConfig staging_ram_config = {};
     staging_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     staging_ram_config.min_alloc_size = MEGABYTES(1);
@@ -412,6 +436,8 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         static_arena,
         &staging_ram_config
     );
+
+    vkMapMemory(to_init->device, to_init->staging_allocator.memory, 0, staging_ram_config.total_size, 0, (void**)&to_init->staging_allocator_mapped);
 
     return true;
 }
@@ -490,13 +516,10 @@ b32 initDescPool(Renderer* to_init) {
 }
 
 b32 initStaging(Renderer* to_init) {
-    u8* staging_memory_mapped;
-    vkMapMemory(to_init->device, to_init->staging_allocator.memory, 0, STAGING_BUFFERS_PER_FRAME*FRAMES_IN_FLIGHT*STAGING_BUFFER_MIN_SIZE, 0, (void**)&staging_memory_mapped);
-
-    u8* staging_memory_cursor = staging_memory_mapped;
+    u8* staging_memory_cursor = to_init->staging_allocator_mapped;
 
     for (u32 staging_idx = 0; staging_idx < ARRAY_COUNT(to_init->staging_buffers); staging_idx++) {
-        StagingBuffer& staging_buffer = to_init->staging_buffers[staging_idx];
+        SharedBuffer& staging_buffer = to_init->staging_buffers[staging_idx];
 
         graphicsMemoryBufferAllocation allocation = graphicsMemoryAllocateBuffer(&to_init->staging_allocator, STAGING_BUFFER_MIN_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);        
         staging_buffer.buffer = allocation.buffer;
@@ -524,7 +547,7 @@ b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, A
     return true;
 }
 
-StagingBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
+SharedBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
     if(renderer->distributed_staging_buffers >= STAGING_BUFFERS_PER_FRAME) {
         return nullptr;
     }
@@ -538,7 +561,7 @@ StagingBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
     // AFTER that vkWaitForFences call.
     u32 current_frame = renderer->frames_counter % FRAMES_IN_FLIGHT;
 
-    StagingBuffer* result = &renderer->staging_buffers[current_frame * STAGING_BUFFERS_PER_FRAME + renderer->distributed_staging_buffers];
+    SharedBuffer* result = &renderer->staging_buffers[current_frame * STAGING_BUFFERS_PER_FRAME + renderer->distributed_staging_buffers];
     renderer->distributed_staging_buffers++;
 
     return result;
@@ -605,159 +628,6 @@ VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena
     return result;
 }
 
-/*
-void createChunkRenderPipelines(Renderer* vk_context, VulkanPipeline* chunk_pipeline, Arena* scratch_arena) {
-    VkShaderModule chunk_vert_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.vert.spv", scratch_arena);
-    VkShaderModule chunk_frag_shader = loadAndCreateShader(vk_context, "./shaders/debug_chunk.frag.spv", scratch_arena);
-
-    VkPipelineShaderStageCreateInfo shader_stages[2] = {};
-    shader_stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shader_stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    shader_stages[0].module = chunk_vert_shader;
-    shader_stages[0].pName = "main";
-    shader_stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    shader_stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    shader_stages[1].module = chunk_frag_shader;
-    shader_stages[1].pName = "main";
-
-    VkVertexInputBindingDescription vertex_binding_descs[1];
-    vertex_binding_descs[0].binding = 0;
-    vertex_binding_descs[0].stride = sizeof(ChunkVertex);
-    vertex_binding_descs[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    VkVertexInputAttributeDescription vertex_attribute_descriptions[2];
-    vertex_attribute_descriptions[0].binding = 0;
-    vertex_attribute_descriptions[0].location = 0;
-    vertex_attribute_descriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    vertex_attribute_descriptions[0].offset = 0;
-    vertex_attribute_descriptions[1].binding = 0;
-    vertex_attribute_descriptions[1].location = 1;
-    vertex_attribute_descriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    vertex_attribute_descriptions[1].offset = sizeof(v3);
-
-    VkPipelineVertexInputStateCreateInfo vertex_input_info = {};
-    vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertex_input_info.pVertexBindingDescriptions = vertex_binding_descs;
-    vertex_input_info.vertexBindingDescriptionCount = ARRAY_COUNT(vertex_binding_descs);
-    vertex_input_info.pVertexAttributeDescriptions = vertex_attribute_descriptions;
-    vertex_input_info.vertexAttributeDescriptionCount = ARRAY_COUNT(vertex_attribute_descriptions);
-
-    VkPipelineInputAssemblyStateCreateInfo assembly_info = {};
-    assembly_info.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    assembly_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    VkPipelineTessellationStateCreateInfo tesselation_info = {};
-    tesselation_info.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
-
-    // NOTE: We will use dynamic state for the viewport.
-    VkPipelineViewportStateCreateInfo viewport_info = {};
-    viewport_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewport_info.viewportCount = 1;
-    viewport_info.scissorCount = 1;
-
-    VkPipelineRasterizationStateCreateInfo raster_info = {};
-    raster_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    raster_info.polygonMode = VK_POLYGON_MODE_FILL;
-    raster_info.cullMode = VK_CULL_MODE_BACK_BIT;
-    raster_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    raster_info.lineWidth = 1.0f;
-
-    VkPipelineMultisampleStateCreateInfo multisample_info = {};
-    multisample_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    VkPipelineDepthStencilStateCreateInfo depth_stencil_info = {};
-    depth_stencil_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_stencil_info.depthTestEnable = VK_TRUE;
-    depth_stencil_info.depthWriteEnable = VK_TRUE;
-    depth_stencil_info.depthCompareOp = VK_COMPARE_OP_LESS;
-
-    VkPipelineColorBlendAttachmentState blend_attachment = {};
-    blend_attachment.blendEnable = VK_FALSE;
-    blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT
-                                      | VK_COLOR_COMPONENT_G_BIT
-                                      | VK_COLOR_COMPONENT_B_BIT
-                                      | VK_COLOR_COMPONENT_A_BIT;
-
-    VkPipelineColorBlendStateCreateInfo blend_info = {};
-    blend_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    blend_info.logicOpEnable = VK_FALSE;
-    blend_info.logicOp = VK_LOGIC_OP_COPY;
-    blend_info.pAttachments = &blend_attachment;
-    blend_info.attachmentCount = 1;
-
-    VkDynamicState dynamic_states[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
-    dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamic_state_info.pDynamicStates = dynamic_states;
-    dynamic_state_info.dynamicStateCount = ARRAY_COUNT(dynamic_states);
-
-    // NOTE: 2 uniform buffers for view and projection matrices.
-    VkDescriptorSetLayoutBinding shader_bindings[2] = {};
-    shader_bindings[0].binding = 0;
-    shader_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    shader_bindings[0].descriptorCount = 1;
-    shader_bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    shader_bindings[1].binding = 1;
-    shader_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    shader_bindings[1].descriptorCount = 1;
-    shader_bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-    VkDescriptorSetLayoutCreateInfo set_info = {};
-    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    set_info.pBindings = shader_bindings;
-    set_info.bindingCount = ARRAY_COUNT(shader_bindings);
-
-    VK_ASSERT(vkCreateDescriptorSetLayout(vk_context->device, &set_info, nullptr, &chunk_pipeline->desc_set_layout));
-
-    // NOTE: 1 push constant for the model matrix.
-    VkPushConstantRange push_constants[1] = {};
-    push_constants[0].offset = 0;
-    push_constants[0].size = sizeof(m4);
-    push_constants[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-    VkPipelineLayoutCreateInfo layout_info = {};
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.pSetLayouts = &chunk_pipeline->desc_set_layout;
-    layout_info.setLayoutCount = 1;
-    layout_info.pPushConstantRanges = push_constants;
-    layout_info.pushConstantRangeCount = ARRAY_COUNT(push_constants);
-
-    VkPipelineLayout layout;
-    VK_ASSERT(vkCreatePipelineLayout(vk_context->device, &layout_info, nullptr, &layout));
-
-    VkFormat color_attachment_format = VK_FORMAT_B8G8R8A8_SRGB;
-    VkFormat depth_attachment_format = VK_FORMAT_D32_SFLOAT;
-    VkPipelineRenderingCreateInfo rendering_info = {};
-    rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering_info.colorAttachmentCount = 1;
-    rendering_info.pColorAttachmentFormats = &color_attachment_format;
-    rendering_info.depthAttachmentFormat = depth_attachment_format;
-
-    VkGraphicsPipelineCreateInfo pipeline_info = {};
-    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipeline_info.pNext = &rendering_info;
-    pipeline_info.pStages = shader_stages;
-    pipeline_info.stageCount = ARRAY_COUNT(shader_stages);
-    pipeline_info.pVertexInputState = &vertex_input_info;
-    pipeline_info.pInputAssemblyState = &assembly_info;
-    pipeline_info.pTessellationState = &tesselation_info;
-    pipeline_info.pViewportState = &viewport_info;
-    pipeline_info.pRasterizationState = &raster_info;
-    pipeline_info.pMultisampleState = &multisample_info;
-    pipeline_info.pDepthStencilState = &depth_stencil_info;
-    pipeline_info.pColorBlendState = &blend_info;
-    pipeline_info.pDynamicState = &dynamic_state_info;
-    pipeline_info.layout = layout;
-
-    chunk_pipeline->layout = layout;
-    VK_ASSERT(vkCreateGraphicsPipelines(vk_context->device, nullptr, 1, &pipeline_info, nullptr, &chunk_pipeline->pipeline))
-
-    vkDestroyShaderModule(vk_context->device, chunk_vert_shader, nullptr);
-    vkDestroyShaderModule(vk_context->device, chunk_frag_shader, nullptr);
-}
-*/
-
 constexpr u32 BUILDER_VRTX_STAGE_ID = 0;
 constexpr u32 BUILDER_FRAG_STAGE_ID = 1;
 
@@ -777,6 +647,13 @@ void pipelineBuilderInitialize(VulkanPipelineBuilder* builder) {
 
     // NOTE: Would be extended by adding vertex buffer / attribute info.
     builder->input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    builder->input_info.pVertexBindingDescriptions = builder->vertex_input_bindings_info;
+    builder->input_info.vertexBindingDescriptionCount = 0;
+    builder->input_info.pVertexAttributeDescriptions = builder->vertex_input_attributes_info;
+    builder->input_info.vertexAttributeDescriptionCount = 0;
+
+    builder->vertex_input_binding_count = 0;
+    builder->vertex_input_attributes_count = 0;
 
     // NOTE: Defaults to triangle list.
     builder->assembly_info.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -869,20 +746,43 @@ void pipelineBuilderEnableAlphaBlending(VulkanPipelineBuilder* builder) {
     builder->blend_attachments[0].alphaBlendOp = VK_BLEND_OP_ADD;
 }
 
+void pipelineBuilderEnableBackfaceCulling(VulkanPipelineBuilder* builder) {
+    builder->raster_info.cullMode = VK_CULL_MODE_BACK_BIT;
+}
+
+void pipelineBuilderEnableDepth(VulkanPipelineBuilder* builder) {
+    builder->depth_stencil_info.depthTestEnable = VK_TRUE;
+    builder->depth_stencil_info.depthWriteEnable = VK_TRUE;
+    builder->depth_stencil_info.depthCompareOp = VK_COMPARE_OP_LESS;
+}
+
 void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder) {
-    ASSERT(builder->current_binding < BUILDER_MAX_DESC_PER_SET);
+    ASSERT(builder->current_desc_binding < BUILDER_MAX_DESC_PER_SET);
 
-    u32 binding_idx = builder->current_set * BUILDER_MAX_DESC_PER_SET + builder->current_binding;
+    u32 binding_idx = builder->current_desc_set * BUILDER_MAX_DESC_PER_SET + builder->current_desc_binding;
 
-    builder->shader_bindings[binding_idx].binding = builder->current_binding;
+    builder->shader_bindings[binding_idx].binding = builder->current_desc_binding;
     builder->shader_bindings[binding_idx].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     builder->shader_bindings[binding_idx].descriptorCount = 1;
     // NOTE: Assume that samplers will only be sampled from in fragment shaders for now.
     builder->shader_bindings[binding_idx].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    builder->sets_bindings_count[builder->current_set]++;
-    builder->current_binding++;
+    builder->sets_bindings_count[builder->current_desc_set]++;
+    builder->current_desc_binding++;
+}
 
+void pipelineBuilderAddUniformBuffer(VulkanPipelineBuilder* builder, VkShaderStageFlags stage) {
+    ASSERT(builder->current_desc_binding < BUILDER_MAX_DESC_PER_SET);
+
+    u32 binding_idx = builder->current_desc_set * BUILDER_MAX_DESC_PER_SET + builder->current_desc_binding;
+
+    builder->shader_bindings[binding_idx].binding = builder->current_desc_binding;
+    builder->shader_bindings[binding_idx].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    builder->shader_bindings[binding_idx].descriptorCount = 1;
+    builder->shader_bindings[binding_idx].stageFlags = stage;
+
+    builder->sets_bindings_count[builder->current_desc_set]++;
+    builder->current_desc_binding++;
 }
 
 void pipelineBuilderAddPushConstant(VulkanPipelineBuilder* builder, usize size, VkShaderStageFlags stages) {
@@ -896,11 +796,36 @@ void pipelineBuilderAddPushConstant(VulkanPipelineBuilder* builder, usize size, 
     builder->push_constants.stageFlags = stages;
 }
 
+void pipelineBuilderAddVertexInputBinding(VulkanPipelineBuilder* builder, usize stride) {
+    ASSERT(builder->vertex_input_binding_count < BUILDER_MAX_VERTEX_BINDINGS);
+
+    builder->vertex_input_bindings_info[builder->vertex_input_binding_count].binding = builder->vertex_input_binding_count;
+    builder->vertex_input_bindings_info[builder->vertex_input_binding_count].stride = stride;
+    builder->vertex_input_bindings_info[builder->vertex_input_binding_count].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    builder->vertex_input_binding_count++;
+}
+
+void pipelineBuilderAddVertexAttribute(VulkanPipelineBuilder* builder, VkFormat format, usize offset) {
+    ASSERT(builder->vertex_input_attributes_count < BUILDER_MAX_VERTEX_ATTRIBUTES);
+
+    builder->vertex_input_attributes_info[builder->vertex_input_attributes_count].binding = builder->vertex_input_binding_count-1;
+    builder->vertex_input_attributes_info[builder->vertex_input_attributes_count].location = builder->vertex_input_attributes_count;
+    builder->vertex_input_attributes_info[builder->vertex_input_attributes_count].format = format;
+    builder->vertex_input_attributes_info[builder->vertex_input_attributes_count].offset = offset;
+
+    builder->vertex_input_attributes_count++;
+}
+
 void pipelineBuilderCreatePipeline(VulkanPipelineBuilder* builder, VkDevice device, VulkanPipeline* to_create) {
     *to_create = {};
 
+    // NOTE: Update the vertex bindings & attributes number.
+    builder->input_info.vertexBindingDescriptionCount = builder->vertex_input_binding_count;
+    builder->input_info.vertexAttributeDescriptionCount= builder->vertex_input_attributes_count;
+
     // NOTE: Set up all the descriptor sets and create their layouts.
-    for (u32 set_idx = 0; set_idx <= builder->current_set; set_idx++) {
+    for (u32 set_idx = 0; set_idx <= builder->current_desc_set; set_idx++) {
         builder->sets_info[set_idx].pBindings = &builder->shader_bindings[set_idx*BUILDER_MAX_DESC_PER_SET];
         builder->sets_info[set_idx].bindingCount = builder->sets_bindings_count[set_idx];
 
@@ -911,7 +836,7 @@ void pipelineBuilderCreatePipeline(VulkanPipelineBuilder* builder, VkDevice devi
     VkPipelineLayoutCreateInfo pipeline_layout_info = {};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipeline_layout_info.pSetLayouts = to_create->desc_sets_layouts;
-    pipeline_layout_info.setLayoutCount = builder->current_set+1;
+    pipeline_layout_info.setLayoutCount = builder->current_desc_set+1;
     pipeline_layout_info.pPushConstantRanges = &builder->push_constants;
     pipeline_layout_info.pushConstantRangeCount = 1;
 

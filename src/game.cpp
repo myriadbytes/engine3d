@@ -68,7 +68,7 @@ void textRenderingInitialize(TextRenderingState* text_rendering_state, Renderer*
     text_rendering_state->bitmap_font_view = image_allocation.image_view;
 
     // NOTE: Get a staging buffer, and write the image bytes to it.
-    StagingBuffer* staging_buffer = rendererRequestStagingBuffer(renderer);
+    SharedBuffer* staging_buffer = rendererRequestStagingBuffer(renderer);
     ASSERT(staging_buffer != nullptr);
     ASSERT(staging_buffer->buffer_size >= bitmap_width * bitmap_height * 4);
 
@@ -254,6 +254,36 @@ void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBu
     }
 }
 
+void chunkPipelineInitialize(Renderer* renderer, VulkanPipeline* to_create, Arena* scratch_arena) {
+    VkShaderModule chunk_vert_shader = loadAndCreateShader(renderer, "./shaders/debug_chunk.vert.spv", scratch_arena);
+    VkShaderModule chunk_frag_shader = loadAndCreateShader(renderer, "./shaders/debug_chunk.frag.spv", scratch_arena);
+
+    VulkanPipelineBuilder builder = {};
+    pipelineBuilderInitialize(&builder);
+
+    pipelineBuilderSetVertexShader(&builder, chunk_vert_shader);
+    pipelineBuilderSetFragmentShader(&builder, chunk_frag_shader);
+    pipelineBuilderEnableBackfaceCulling(&builder);
+    pipelineBuilderEnableDepth(&builder);
+
+    // NOTE: Add a vertex buffer and two vec3 for position and normals.
+    pipelineBuilderAddVertexInputBinding(&builder, sizeof(ChunkVertex));
+    pipelineBuilderAddVertexAttribute(&builder, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pipelineBuilderAddVertexAttribute(&builder, VK_FORMAT_R32G32B32_SFLOAT, sizeof(v3));
+
+    // NOTE: Two uniform buffers for the view and proj matrices.
+    // The model matrix is handled with a push constant so we don't have
+    // to have too much descriptor set updating.
+    pipelineBuilderAddUniformBuffer(&builder, VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddUniformBuffer(&builder, VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddPushConstant(&builder, sizeof(m4), VK_SHADER_STAGE_VERTEX_BIT);
+
+    pipelineBuilderCreatePipeline(&builder, renderer->device, to_create);
+    
+    vkDestroyShaderModule(renderer->device, chunk_vert_shader, nullptr);
+    vkDestroyShaderModule(renderer->device, chunk_frag_shader, nullptr);
+}
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -267,25 +297,15 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    // NOTE: We'll have a few staging buffers
-    // so we can upload multiple meshes per frame.
-    // Each one is 2 MB, the max size of a chunk mesh
-    // (until we add transparent blocks).
-    VkDeviceMemory staging_memory;
-    u8* staging_memory_mapped;
-    VkBuffer staging_buffers[16];
-
-    // Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world;
-    // Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
-    Chunk test_chunk;
+    Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world_hashmap;
+    Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
 
     VulkanPipeline chunk_render_pipeline;
     // VulkanPipeline wireframe_render_pipeline;
 
-    VkBuffer view_matrix_buffers[FRAMES_IN_FLIGHT];
-    usize view_matrix_buffers_offsets[FRAMES_IN_FLIGHT];
-    VkBuffer projection_matrix_buffers[FRAMES_IN_FLIGHT];
-    usize projection_matrix_buffers_offsets[FRAMES_IN_FLIGHT];
+    SharedBuffer view_matrix_uniforms[FRAMES_IN_FLIGHT];
+    SharedBuffer projection_matrix_uniforms[FRAMES_IN_FLIGHT];
+
     VkDescriptorSet matrices_desc_sets[FRAMES_IN_FLIGHT];
 
     TextRenderingState text_rendering_state;
@@ -319,9 +339,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             &game_state->frame_arena)
         );
 
-        // hashmapInitialize(&game_state->world, &chunkPositionHash);
-        // poolInitialize(&game_state->chunk_pool);
-
         game_state->player_position = {110, 40, 110};
         game_state->orbit_mode = false;
         game_state->time = 0;
@@ -330,42 +347,29 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->random_series = 0xC0FFEE; // fixed seed for now
         simplex_table_from_seed(&game_state->simplex_table, 0xC0FFEE);
 
-        // createChunkRenderPipelines(&game_state->renderer, &game_state->chunk_render_pipeline, &game_state->frame_arena);
+        chunkPipelineInitialize(&game_state->renderer, &game_state->chunk_render_pipeline, &game_state->frame_arena);
 
-        /*
+        // NOTE: For each frame, create 2 uniforms the view and projection matrices.
+        // Also create a descriptor set that will point to that frame's uniforms.
         for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-            // NOTE: Create 3 small RAM (but GPU-visible) buffers per-frame for the model, view and projection matrices.
-            VkBufferCreateInfo buffer_info = {};
-            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            buffer_info.size = sizeof(m4);
-            buffer_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+            game_state->view_matrix_uniforms[frame_idx] =
+                rendererAllocateUniformBuffer(&game_state->renderer, sizeof(m4));
 
-            VK_ASSERT(vkCreateBuffer(game_state->renderer.device, &buffer_info, nullptr, &game_state->view_matrix_buffers[frame_idx]));
-            BuddyAllocationResult view_alloc = buddyAlloc(&game_state->uniforms_allocator.allocator, sizeof(m4));
-            ASSERT(view_alloc.size != 0);
-            VK_ASSERT(vkBindBufferMemory(game_state->renderer.device, game_state->view_matrix_buffers[frame_idx], game_state->uniforms_allocator.memory, view_alloc.offset));
-            game_state->view_matrix_buffers_offsets[frame_idx] = view_alloc.offset;
+            game_state->projection_matrix_uniforms[frame_idx] =
+                rendererAllocateUniformBuffer(&game_state->renderer, sizeof(m4));
 
-            VK_ASSERT(vkCreateBuffer(game_state->renderer.device, &buffer_info, nullptr, &game_state->projection_matrix_buffers[frame_idx]));
-            BuddyAllocationResult proj_alloc = buddyAlloc(&game_state->uniforms_allocator.allocator, sizeof(m4));
-            ASSERT(proj_alloc.size != 0);
-            VK_ASSERT(vkBindBufferMemory(game_state->renderer.device, game_state->projection_matrix_buffers[frame_idx], game_state->uniforms_allocator.memory, proj_alloc.offset));
-            game_state->projection_matrix_buffers_offsets[frame_idx] = proj_alloc.offset;
-
-            // NOTE: Allocate one descriptor set per-frame for those matrices.
             VkDescriptorSetAllocateInfo set_alloc_info = {};
             set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            set_alloc_info.descriptorPool = game_state->renderer.uniforms_desc_pool;
+            set_alloc_info.descriptorPool = game_state->renderer.global_desc_pool;
             set_alloc_info.descriptorSetCount = 1;
-            set_alloc_info.pSetLayouts = &game_state->chunk_render_pipeline.desc_set_layout;
+            set_alloc_info.pSetLayouts = &game_state->chunk_render_pipeline.desc_sets_layouts[0];
             VK_ASSERT(vkAllocateDescriptorSets(game_state->renderer.device, &set_alloc_info, &game_state->matrices_desc_sets[frame_idx]));
 
-            // NOTE: Write the buffer descriptors to that frame descriptor set.
             VkDescriptorBufferInfo buffer_desc_infos[2];
-            buffer_desc_infos[0].buffer = game_state->view_matrix_buffers[frame_idx];
+            buffer_desc_infos[0].buffer = game_state->view_matrix_uniforms[frame_idx].buffer;
             buffer_desc_infos[0].offset = 0;
             buffer_desc_infos[0].range = sizeof(m4);
-            buffer_desc_infos[1].buffer = game_state->projection_matrix_buffers[frame_idx];
+            buffer_desc_infos[1].buffer = game_state->projection_matrix_uniforms[frame_idx].buffer;
             buffer_desc_infos[1].offset = 0;
             buffer_desc_infos[1].range = sizeof(m4);
             
@@ -385,15 +389,21 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
             vkUpdateDescriptorSets(game_state->renderer.device, ARRAY_COUNT(set_writes), set_writes, 0, nullptr);
         }
-        // NOTE: Map our uniform memory to edit the buffers after the fact.
-        vkMapMemory(game_state->renderer.device, game_state->uniforms_allocator.memory, 0, game_state->uniforms_allocator.allocator.total_size, 0, (void**)&game_state->uniforms_memory_mapped);
+
+        hashmapInitialize(&game_state->world_hashmap, chunkPositionHash);
+        poolInitialize(&game_state->chunk_pool);
 
         // NOTE: Initialize the test chunk.
-        v3i test_chunk_pos = {5, 1, 5};
+        Chunk* test_chunk = PoolAcquireItem(&game_state->chunk_pool);
+        *test_chunk = {};
+        test_chunk->chunk_position = v3i {0, 0, 1};
+        test_chunk->needs_remeshing = true;
+        test_chunk->is_loaded = true;
+
         for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
-            u32 block_x = test_chunk_pos.x * CHUNK_W + (block_idx % CHUNK_W);
-            u32 block_y = test_chunk_pos.y * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
-            u32 block_z = test_chunk_pos.z * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
+            u32 block_x = test_chunk->chunk_position.x() * CHUNK_W + (block_idx % CHUNK_W);
+            u32 block_y = test_chunk->chunk_position.y() * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
+            u32 block_z = test_chunk->chunk_position.z() * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
 
             // TODO: This needs to be parameterized and put into a function.
             // The fancy name is "fractal brownian motion", but it's just summing
@@ -408,43 +418,11 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             }
 
             if (block_y <= height) {
-                game_state->test_chunk.data[block_idx] = 1;
+                test_chunk->data[block_idx] = 1;
             } else {
-                game_state->test_chunk.data[block_idx] = 0;
+                test_chunk->data[block_idx] = 0;
             }
         }
-
-        VkBufferCreateInfo chunk_vbo_info = {};
-        chunk_vbo_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        chunk_vbo_info.size = MEGABYTES(2);
-        chunk_vbo_info.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-        VK_ASSERT(vkCreateBuffer(game_state->renderer.device, &chunk_vbo_info, nullptr, &game_state->test_chunk.vertex_buffer));
-        BuddyAllocationResult chunk_vbo_alloc = buddyAlloc(&game_state->vram_allocator.allocator, MEGABYTES(2));
-        ASSERT(chunk_vbo_alloc.size != 0);
-        VK_ASSERT(vkBindBufferMemory(game_state->renderer.device, game_state->test_chunk.vertex_buffer, game_state->vram_allocator.memory, chunk_vbo_alloc.offset));
-
-        game_state->test_chunk.needs_remeshing = true;
-
-        // NOTE: Initialize the staging buffers for the chunk vertex buffers.
-        game_state->staging_memory = debugAllocateDirectGPUMemory(&game_state->renderer, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, MEGABYTES(2) * ARRAY_COUNT(game_state->staging_buffers));
-        vkMapMemory(game_state->renderer.device, game_state->staging_memory, 0, MEGABYTES(2) * ARRAY_COUNT(game_state->staging_buffers), 0, (void**)&game_state->staging_memory_mapped);
-
-        for (u32 staging_buffer_idx = 0; staging_buffer_idx < ARRAY_COUNT(game_state->staging_buffers); staging_buffer_idx++) {
-            VkBufferCreateInfo buffer_info = {};
-            buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            buffer_info.size = MEGABYTES(2);
-            buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-            VK_ASSERT(vkCreateBuffer(game_state->renderer.device, &buffer_info, nullptr, &game_state->staging_buffers[staging_buffer_idx]));
-            VK_ASSERT(vkBindBufferMemory(
-                game_state->renderer.device,
-                game_state->staging_buffers[staging_buffer_idx],
-                game_state->staging_memory,
-                staging_buffer_idx * MEGABYTES(2)
-            ));
-        }
-        */
 
         memory->is_initialized = true;
     }
@@ -455,18 +433,18 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     f32 mouse_sensitivity = 0.01;
     f32 stick_sensitivity = 0.05;
 
-    game_state->camera_pitch += input->kb.mouse_delta.y * mouse_sensitivity;
-    game_state->camera_yaw += input->kb.mouse_delta.x * mouse_sensitivity;
+    game_state->camera_pitch += input->kb.mouse_delta.y() * mouse_sensitivity;
+    game_state->camera_yaw += input->kb.mouse_delta.x() * mouse_sensitivity;
 
-    game_state->camera_pitch += input->ctrl.right_stick.y * stick_sensitivity;
-    game_state->camera_yaw += input->ctrl.right_stick.x * stick_sensitivity;
+    game_state->camera_pitch += input->ctrl.right_stick.y() * stick_sensitivity;
+    game_state->camera_yaw += input->ctrl.right_stick.x() * stick_sensitivity;
 
     f32 safe_pitch = PI32 / 2.f - 0.05f;
     game_state->camera_pitch = clamp(game_state->camera_pitch, -safe_pitch, safe_pitch);
 
-    game_state->camera_forward.x = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
-    game_state->camera_forward.y = sinf(game_state->camera_pitch);
-    game_state->camera_forward.z = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
+    game_state->camera_forward.x() = cosf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
+    game_state->camera_forward.y() = sinf(game_state->camera_pitch);
+    game_state->camera_forward.z() = sinf(game_state->camera_yaw) * cosf(game_state->camera_pitch);
 
     v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
 
@@ -481,10 +459,10 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     // That's for speedrunners.
 
     if(input->kb.keys[SCANCODE_Q].is_down || input->ctrl.lb.is_down) {
-        game_state->player_position.y -= speed;
+        game_state->player_position.y() -= speed;
     }
     if(input->kb.keys[SCANCODE_E].is_down || input->ctrl.rb.is_down) {
-        game_state->player_position.y += speed;
+        game_state->player_position.y() += speed;
     }
     if(input->kb.keys[SCANCODE_A].is_down) {
         game_state->player_position += -camera_right * speed;
@@ -499,8 +477,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->player_position += game_state->camera_forward * speed;
     }
 
-    game_state->player_position += input->ctrl.left_stick.x * camera_right * speed;
-    game_state->player_position += input->ctrl.left_stick.y * game_state->camera_forward * speed;
+    game_state->player_position += input->ctrl.left_stick.x() * camera_right * speed;
+    game_state->player_position += input->ctrl.left_stick.y() * game_state->camera_forward * speed;
 
     if (input->kb.keys[SCANCODE_G].is_down && input->kb.keys[SCANCODE_G].transitions == 1) {
         game_state->is_wireframe = !game_state->is_wireframe;
@@ -551,8 +529,36 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         );
     }
 
+    // NOTE: Iterate on all chunks from the pool and record copy commands
+    // for every chunk from that pool that needs it's mesh buffer updated.
+    for (u32 chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
+        Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
+        if (!chunk->is_loaded) continue;
+        if (!chunk->needs_remeshing) continue;
+
+        SharedBuffer* staging_buffer = rendererRequestStagingBuffer(&game_state->renderer);
+        // NOTE: No more staging buffers available !
+        // The remaining chunks will have to wait for the next frame.
+        if (staging_buffer == nullptr) break;
+
+        usize generated_vertices;
+        generateNaiveChunkMesh(
+            chunk,
+            (ChunkVertex*)staging_buffer->mapped_data,
+            &generated_vertices
+        );
+        ASSERT(generated_vertices * sizeof(ChunkVertex) <= staging_buffer->buffer_size);
+
+        if (chunk->vertex_buffer_size < generated_vertices * sizeof(ChunkVertex)) {
+            if (chunk->vertex_buffer != nullptr) {
+                // NOTE: We need to de-allocate the buffer here.
+                ASSERT(false);
+            }
+
+
+        }
+    }
     /*
-    // NOTE: Rebuild and upload our test chunk vertex buffer if needed.
     if (game_state->test_chunk.needs_remeshing) {
         game_state->test_chunk.needs_remeshing = false;
 
@@ -723,12 +729,12 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     StringCbPrintf(debug_text_string,
         ARRAY_COUNT(debug_text_string),
         "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d",
-        game_state->player_position.x,
-        game_state->player_position.y,
-        game_state->player_position.z,
-        chunk_position.x,
-        chunk_position.y,
-        chunk_position.z
+        game_state->player_position.x(),
+        game_state->player_position.y(),
+        game_state->player_position.z(),
+        chunk_position.x(),
+        chunk_position.y(),
+        chunk_position.z()
     );
     drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame.cmd_buffer, debug_text_string, 0, 0);
 

@@ -36,7 +36,9 @@ struct Frame {
     VkImageView depth_view;
 };
 
-struct StagingBuffer {
+// NOTE: This is a buffer in GPU-visible RAM,
+// for staging buffers or uniforms.
+struct SharedBuffer {
     VkBuffer buffer;
     usize buffer_size;
     u8* mapped_data;
@@ -61,9 +63,11 @@ struct Renderer {
     // NOTE: VRAM with big subdivision for things like
     // vertex buffers or render targets.
     GraphicsMemoryAllocator vram_allocator;
+
     // NOTE: GPU-visible host RAM with small subdivision
     // for uniform buffers (e.g. matrices).
     GraphicsMemoryAllocator host_allocator;
+    u8* host_allocator_mapped;
 
     // NOTE: GPU-visible host RAM with big subdivisions,
     // for our staging buffers. We don't actually need
@@ -71,12 +75,13 @@ struct Renderer {
     // and allocated once at startup, but it's easier to
     // reuse the abstractions I already wrote.
     GraphicsMemoryAllocator staging_allocator;
+    u8* staging_allocator_mapped;
 
     // NOTE: There is number of staging buffers per frame for uploads.
     // I think it's better to separate per frames so you don't use a staging
     // buffer that's being copied from during the execution of frame A's
     // commands while you are recording frame B's commands.
-    StagingBuffer staging_buffers[FRAMES_IN_FLIGHT*STAGING_BUFFERS_PER_FRAME];
+    SharedBuffer staging_buffers[FRAMES_IN_FLIGHT*STAGING_BUFFERS_PER_FRAME];
     u32 distributed_staging_buffers;
 
     VkDescriptorPool global_desc_pool;
@@ -84,7 +89,8 @@ struct Renderer {
 
 b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena);
 // NOTE: Returns NULL if no more staging buffers available for this frame.
-StagingBuffer* rendererRequestStagingBuffer(Renderer* renderer);
+SharedBuffer* rendererRequestStagingBuffer(Renderer* renderer);
+SharedBuffer rendererAllocateUniformBuffer(Renderer* renderer, usize uniform_size);
 
 VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena* scratch_arena);
 
@@ -108,6 +114,8 @@ struct VulkanPipeline {
 };
 
 constexpr u32 BUILDER_MAX_DESC_PER_SET = 4;
+constexpr u32 BUILDER_MAX_VERTEX_BINDINGS = 2;
+constexpr u32 BUILDER_MAX_VERTEX_ATTRIBUTES = 8;
 
 struct VulkanPipelineBuilder {
     Arena* scratch_arena;
@@ -130,6 +138,11 @@ struct VulkanPipelineBuilder {
     VkDynamicState dynamic_states[2];
     VkPipelineDynamicStateCreateInfo dynamic_state_info;
 
+    VkVertexInputBindingDescription vertex_input_bindings_info[BUILDER_MAX_VERTEX_BINDINGS];
+    u32 vertex_input_binding_count;
+    VkVertexInputAttributeDescription vertex_input_attributes_info[BUILDER_MAX_VERTEX_ATTRIBUTES];
+    u32 vertex_input_attributes_count;
+
     VkFormat color_attachment_format;
     VkFormat depth_attachment_format;
     VkPipelineRenderingCreateInfo rendering_info;
@@ -139,24 +152,25 @@ struct VulkanPipelineBuilder {
     VkDescriptorSetLayoutBinding shader_bindings[PIPELINES_MAX_SETS * BUILDER_MAX_DESC_PER_SET];
     VkDescriptorSetLayoutCreateInfo sets_info[PIPELINES_MAX_SETS];
     u32 sets_bindings_count[PIPELINES_MAX_SETS];
-    u32 current_set;
-    u32 current_binding;
+    u32 current_desc_set;
+    u32 current_desc_binding;
 
     VkPushConstantRange push_constants;
 };
 
-// TODO: enable backface culling
 // TODO: enable wireframe
-// TODO: enable depth
-// TODO: add uniform
-// TODO: add vertex buffer ? or derive from attributes
-// TODO: add vertex attribute
 void pipelineBuilderInitialize(VulkanPipelineBuilder* builder);
 void pipelineBuilderSetVertexShader(VulkanPipelineBuilder* builder, VkShaderModule shader);
 void pipelineBuilderSetFragmentShader(VulkanPipelineBuilder* builder, VkShaderModule shader);
 void pipelineBuilderEnableAlphaBlending(VulkanPipelineBuilder* builder);
+void pipelineBuilderEnableBackfaceCulling(VulkanPipelineBuilder* builder);
+void pipelineBuilderEnableDepth(VulkanPipelineBuilder* builder);
 
 void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder);
+void pipelineBuilderAddUniformBuffer(VulkanPipelineBuilder* builder, VkShaderStageFlags stage);
 void pipelineBuilderAddPushConstant(VulkanPipelineBuilder* builder, usize size, VkShaderStageFlags stages);
+
+void pipelineBuilderAddVertexInputBinding(VulkanPipelineBuilder* builder, usize stride);
+void pipelineBuilderAddVertexAttribute(VulkanPipelineBuilder* builder, VkFormat format, usize offset);
 
 void pipelineBuilderCreatePipeline(VulkanPipelineBuilder* builder, VkDevice device, VulkanPipeline* to_create);

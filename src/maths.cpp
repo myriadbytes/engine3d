@@ -18,7 +18,7 @@ m4 lookAt(v3 eye, v3 target) {
     m4 rotation_part = makeMatrixFromRows(x, y, z);
 
     // NOTE: So far we are rotating the world correctly, but we are missing the translation part which is pretty straightforward.
-    m4 translation_part = makeTranslation(-eye.x, -eye.y, -eye.z);
+    m4 translation_part = makeTranslation(-eye.x(), -eye.y(), -eye.z());
 
     // NOTE: The order of transformation is reversed because the matrices themselves are already inverted. Tricky.
     // https://www.3dgep.com/understanding-the-view-matrix/

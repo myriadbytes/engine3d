@@ -40,6 +40,7 @@ game_source_files = [
     "src/allocators.cpp",
     "src/maths.cpp",
     "src/noise.cpp",
+    "src/world.cpp",
     "src/img.cpp",
     "src/gpu.cpp",
 ]

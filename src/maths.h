@@ -1,12 +1,14 @@
 #pragma once
 
-// NOTE: none of this is optimized at all
+// WARNING: None of this has been optimized at all.
+// The matrix multiplying especially is a low hanging
+// fruit.
 
 #include <math.h>
 #include "common.h"
 
-// MATH OPERATIONS
-// NOTE: They are prefixed with "m" in order
+// NOTE:  OPERATIONS
+// They are prefixed with "m" in order
 // to not collide with the math.h functions
 // until we stop including it.
 
@@ -17,79 +19,33 @@ inline i32 mfloor(f32 x) {
     return x < truncated ? (truncated - 1) : truncated;
 }
 
-// MATRIX STRUCTURES
+// NOTE: STRUCTURES
 
-struct v2 {
-    union {
-        struct {
-            f32 x, y;
-        };
-        struct {
-            f32 u, v;
-        };
-        f32 data[2];
-    };
+template <typename T, usize N>
+struct Vector {
+    T data[N];  
+    
+    constexpr T& x() requires (N > 0) { return data[0]; }
+    constexpr T& y() requires (N > 1) { return data[1]; }
+    constexpr T& z() requires (N > 2) { return data[2]; }
+    constexpr T& w() requires (N > 3) { return data[3]; }
+
+    constexpr T& r() requires (N > 0) { return data[0]; }
+    constexpr T& g() requires (N > 1) { return data[1]; }
+    constexpr T& b() requires (N > 2) { return data[2]; }
+    constexpr T& a() requires (N > 3) { return data[3]; }
+
+    constexpr T& u() requires (N > 0) { return data[0]; }
+    constexpr T& v() requires (N > 1) { return data[1]; }
 };
 
-struct v3 {
-    union {
-        struct {
-            f32 x, y, z;
-        };
-        struct {
-            f32 r, g, b;
-        };
-        f32 data[3];
-    };
-};
+using v2 = Vector<f32, 2>;
+using v3 = Vector<f32, 3>;
+using v4 = Vector<f32, 4>;
 
-struct v4 {
-    union {
-        struct {
-            f32 x, y, z, w;
-        };
-        struct {
-            f32 r, g, b, a;
-        };
-        f32 data[4];
-    };
-};
-
-struct v2i {
-    union {
-        struct {
-            i32 x, y;
-        };
-        struct {
-            i32 u, v;
-        };
-        i32 data[2];
-    };
-};
-
-struct v3i {
-    union {
-        struct {
-            i32 x, y, z;
-        };
-        struct {
-            i32 r, g, b;
-        };
-        i32 data[3];
-    };
-};
-
-struct v4i {
-    union {
-        struct {
-            i32 x, y, z, w;
-        };
-        struct {
-            i32 r, g, b, a;
-        };
-        i32 data[4];
-    };
-};
+using v2i = Vector<i32, 2>;
+using v3i = Vector<i32, 3>;
+using v4i = Vector<i32, 3>;
 
 struct m4 {
     f32 data[16];
@@ -104,147 +60,108 @@ struct m4 {
     }
 };
 
-// MATRIX OPERATORS
+// NOTE: OPERATORS
 
-inline v2 operator+ (v2 a, v2 b) {
-    v2 result;
-    result.x = a.x + b.x;
-    result.y = a.y + b.y;
+// NOTE: Most are implemented as constexpr loops. I have checked
+// on Godbolt and the loop disappears when using atleast -O2.
+// Let's hope the compile time doesn't explode with all these
+// templates !
+
+template <typename T, usize N>
+constexpr Vector<T, N> operator+ (Vector<T, N> a, Vector<T, N> b) {
+    Vector<T, N> result;
+
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = a.data[i] + b.data[i];
+    }
+
     return result;
 }
 
-inline v3 operator+ (v3 a, v3 b) {
-    v3 result;
-    result.x = a.x + b.x;
-    result.y = a.y + b.y;
-    result.z = a.z + b.z;
-    return result;
-}
+template <typename T, usize N>
+constexpr Vector<T, N>& operator+= (Vector<T,N>& a, Vector<T,N> b) {
 
-inline v4 operator+ (v4 a, v4 b) {
-    v4 result;
-    result.x = a.x + b.x;
-    result.y = a.y + b.y;
-    result.z = a.z + b.z;
-    result.w = a.w + b.w;
-    return result;
-}
+    for (usize i = 0; i < N; ++i) {
+        a.data[i] += b.data[i];
+    }
 
-inline v2& operator+= (v2& a, v2 b) {
-    a.x += b.x;
-    a.y += b.y;
     return a;
 }
 
-inline v3 operator+= (v3& a, v3 b) {
-    a.x += b.x;
-    a.y += b.y;
-    a.z += b.z;
-    return a;
-}
+template <typename T, usize N>
+constexpr Vector<T,N> operator- (Vector<T,N> a, Vector<T,N> b) {
+    Vector<T,N> result;
 
-inline v4 operator+= (v4& a, v4 b) {
-    a.x += b.x;
-    a.y += b.y;
-    a.z += b.z;
-    a.w += b.w;
-    return a;
-}
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = a.data[i] - b.data[i];
+    }
 
-inline v2 operator- (v2 a, v2 b) {
-    v2 result;
-    result.x = a.x - b.x;
-    result.y = a.y - b.y;
     return result;
 }
 
-inline v3 operator- (v3 a, v3 b) {
-    v3 result;
-    result.x = a.x - b.x;
-    result.y = a.y - b.y;
-    result.z = a.z - b.z;
+template <typename T, usize N>
+constexpr Vector<T,N> operator- (Vector<T,N> a) {
+    Vector<T,N> result;
+
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = -a.data[i];
+    }
+
     return result;
 }
 
-inline v4 operator- (v4 a, v4 b) {
-    v4 result;
-    result.x = a.x - b.x;
-    result.y = a.y - b.y;
-    result.z = a.z - b.z;
-    result.w = a.w - b.w;
+
+template <typename T, usize N>
+constexpr Vector<T, N> operator* (f32 scalar, Vector<T, N> a) {
+    Vector<T, N> result;
+
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = scalar * a.data[i];
+    }
+
     return result;
 }
 
-inline v2 operator- (v2 a) {
-    v2 result;
-    result.x = -a.x;
-    result.y = -a.y;
-    return result;
-}
-
-inline v3 operator- (v3 a) {
-    v3 result;
-    result.x = -a.x;
-    result.y = -a.y;
-    result.z = -a.z;
-    return result;
-}
-
-inline v4 operator- (v4 a) {
-    v4 result;
-    result.x = -a.x;
-    result.y = -a.y;
-    result.z = -a.z;
-    result.w = -a.w;
-    return result;
-}
-
-inline v2 operator* (f32 scalar, v2 a) {
-    v2 result;
-    result.x = a.x * scalar;
-    result.y = a.y * scalar;
-    return result;
-}
-
-inline v2 operator* (v2 a, f32 scalar) {
+template <typename T, usize N>
+constexpr Vector<T, N> operator* (Vector<T, N> a, f32 scalar) {
     return scalar * a;
 }
 
-inline v3 operator* (f32 scalar, v3 a) {
-    v3 result;
-    result.x = a.x * scalar;
-    result.y = a.y * scalar;
-    result.z = a.z * scalar;
+// NOTE: This is an element-wise product,
+// for GLSL compatibility.
+template <typename T, usize N>
+constexpr Vector<T, N> operator* (Vector<T, N> a, Vector<T, N> b) {
+    Vector<T, N> result;
+
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = a.data[i] * b.data[i];
+    }
+
     return result;
 }
 
-inline v3 operator* (v3 a, f32 scalar) {
-    return scalar * a;
-}
+template <typename T, usize N>
+constexpr Vector<T, N> operator/ (Vector<T, N> a, f32 scalar) {
+    Vector<T, N> result;
 
-inline v3 operator* (v3 a, v3 b) {
-    // element-wise product, like in GLSL
-    v3 result;
-    result.x = a.x * b.x;
-    result.y = a.y * b.y;
-    result.z = a.z * b.z;
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = a.data[i] / scalar;
+    }
+
     return result;
 }
 
-inline v4 operator* (f32 scalar, v4 a) {
-    v4 result;
-    result.x = a.x * scalar;
-    result.y = a.y * scalar;
-    result.z = a.z * scalar;
-    result.w = a.w * scalar;
-    return result;
+template <typename T, usize N>
+constexpr bool operator== (Vector<T, N> a, Vector<T, N> b) {
+
+    for (usize i = 0; i < N; ++i) {
+        if (a.data[i] != b.data[i]) return false;
+    }
+
+    return true;
 }
 
-inline v4 operator* (v4 a, f32 scalar) {
-    return scalar * a;
-}
-
-inline m4 operator*(m4 a, m4 b) {
+constexpr m4 operator*(const m4& a, const m4& b) {
     m4 result;
 
     for (int row = 0; row < 4; ++row) {
@@ -260,90 +177,58 @@ inline m4 operator*(m4 a, m4 b) {
     return result;
 }
 
-inline v2 operator/ (v2 a, f32 scalar) {
-    v2 result;
-    result.x = a.x * scalar;
-    result.y = a.y * scalar;
+// NOTE: FUNCTIONS
+
+template <typename T, usize N>
+constexpr f32 dot (Vector<T, N> a, Vector<T, N> b) {
+    f32 result = 0;
+
+    for (usize i = 0; i < N; ++i) {
+        result += a.data[i] * b.data[i];
+    }
+
     return result;
 }
 
-inline v3 operator/ (v3 a, f32 scalar) {
-    v3 result;
-    result.x = a.x / scalar;
-    result.y = a.y / scalar;
-    result.z = a.z / scalar;
-    return result;
-}
-
-inline v4 operator/ (v4 a, f32 scalar) {
-    v4 result;
-    result.x = a.x / scalar;
-    result.y = a.y / scalar;
-    result.z = a.z / scalar;
-    result.w = a.w / scalar;
-    return result;
-}
-
-inline bool operator== (v3i& a, v3i& b) {
-    return a.x == b.x
-    &&     a.y == b.y
-    &&     a.z == b.z;   
-}
-// MATRIX FUNCTIONS
-
-inline f32 dot(v3 a, v3 b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-inline f32 dot(v2 a, v2 b) {
-    return a.x * b.x + a.y * b.y;
-}
-
-inline f32 lengthSquared(v3 a) {
+template <typename T, usize N>
+constexpr f32 length2 (Vector<T, N> a) {
     return dot(a, a);
 }
 
-inline f32 lengthSquared(v2 a) {
-    return dot(a, a);
+template <typename T, usize N>
+constexpr f32 length (Vector<T, N> a) {
+    return sqrtf(length2(a));
 }
 
-inline f32 length(v3 a) {
-    return sqrtf(lengthSquared(a));
-}
-
-inline f32 length(v2 a) {
-    return sqrtf(lengthSquared(a));
-}
-
-inline v3 normalize(v3 a) {
+template <typename T, usize N>
+constexpr Vector<T, N> normalize (Vector<T, N> a) {
     return a * (1.0f / length(a));
 }
 
-inline v2 normalize(v2 a) {
-    return a * (1.0f / length(a));
-}
-
-inline v3 cross(v3 a, v3 b) {
+constexpr v3 cross(v3 a, v3 b) {
     v3 result;
-    result.x = a.y * b.z - a.z * b.y;
-    result.y = a.z * b.x - a.x * b.z;
-    result.z = a.x * b.y - a.y * b.x;
+    result.x() = a.y() * b.z() - a.z() * b.y();
+    result.y() = a.z() * b.x() - a.x() * b.z();
+    result.z() = a.x() * b.y() - a.y() * b.x();
     return result;
 }
 
-inline v3 abs(v3 a) {
-    v3 result;
-    result.x = fabsf(a.x);
-    result.y = fabsf(a.y);
-    result.z = fabsf(a.z);
+template <typename T, usize N>
+constexpr Vector<T, N> abs(Vector<T, N> a) {
+    Vector<T, N> result;
+
+    for (usize i = 0; i < N; ++i) {
+        result.data[i] = fabsf(a.data[i]);
+    }
+
     return result;
 }
 
-inline f32 max(f32 a, f32 b) {
+constexpr f32 max(f32 a, f32 b) {
     return b > a ? b : a;
 }
 
-inline f32 min(f32 a, f32 b) {
+constexpr f32 min(f32 a, f32 b) {
     return b < a ? b : a;
 }
 
@@ -351,10 +236,10 @@ inline f32 min(f32 a, f32 b) {
 // The actual memory ordering is irrelevant for usage.
 inline m4 makeMatrixFromColumns(v3 a, v3 b, v3 c) {
     return m4 {
-        a.x, a.y, a.z, 0.f,
-        b.x, b.y, b.z, 0.f,
-        c.x, c.y, c.z, 0.f,
-        0.f, 0.f, 0.f, 1.f
+        a.x(), a.y(), a.z(), 0.f,
+        b.x(), b.y(), b.z(), 0.f,
+        c.x(), c.y(), c.z(), 0.f,
+        0.f,   0.f,   0.f,   1.f
     };
 }
 
@@ -362,10 +247,10 @@ inline m4 makeMatrixFromColumns(v3 a, v3 b, v3 c) {
 // The actual memory ordering is irrelevant for usage.
 inline m4 makeMatrixFromRows(v3 a, v3 b, v3 c) {
     return m4 {
-        a.x, b.x, c.x, 0.f,
-        a.y, b.y, c.y, 0.f,
-        a.z, b.z, c.z, 0.f,
-        0.f, 0.f, 0.f, 1.f
+        a.x(), b.x(), c.x(), 0.f,
+        a.y(), b.y(), c.y(), 0.f,
+        a.z(), b.z(), c.z(), 0.f,
+        0.f,   0.f,   0.f,   1.f
     };
 }
 
@@ -379,7 +264,7 @@ inline m4 makeTranslation(f32 x, f32 y, f32 z) {
 }
 
 inline m4 makeTranslation(v3 a) {
-    return makeTranslation(a.x, a.y, a.z);
+    return makeTranslation(a.x(), a.y(), a.z());
 }
 
 inline m4 makeScale(f32 x, f32 y, f32 z) {
@@ -392,7 +277,7 @@ inline m4 makeScale(f32 x, f32 y, f32 z) {
 }
 
 inline m4 makeScale(v3 a) {
-    return makeScale(a.x, a.y, a.z);
+    return makeScale(a.x(), a.y(), a.z());
 }
 
 m4 lookAt(v3 eye, v3 target);
