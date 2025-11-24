@@ -128,7 +128,7 @@ void buddyUtilsRemoveFromFreeList(BuddyAllocator* allocator, u32 slot_idx) {
     slot->freelist_valid = false;
 }
 
-BuddyAllocationResult buddyAlloc(BuddyAllocator* allocator, usize size) {
+BuddyAllocation buddyAlloc(BuddyAllocator* allocator, usize size) {
 
     if (size > allocator->max_alloc_size) return {0, 0};
     if (size < allocator->min_alloc_size) size = allocator->min_alloc_size;
@@ -184,7 +184,7 @@ BuddyAllocationResult buddyAlloc(BuddyAllocator* allocator, usize size) {
     slot->allocated = true;
     slot->pool_idx = pool_idx;
 
-    BuddyAllocationResult result = {};
+    BuddyAllocation result = {};
     result.offset = slot_idx * allocator->min_alloc_size;
     result.size = 1 << (buddyFastLog2(allocator->min_alloc_size) + pool_idx);
 

@@ -20,7 +20,36 @@ struct GraphicsMemoryAllocator {
     VkDevice device;
     BuddyAllocator allocator;    
     VkDeviceMemory memory;    
+    // NOTE: This is null if the memory is not
+    // mappable.
+    u8* mapped;
 };
+
+// NOTE: This is used:
+// - To write to the buffer if it has been memory-mapped.
+// - To keep track of the allocation data for freeing.
+struct GPUMemoryAllocation {
+    usize alloc_offset;
+    usize alloc_size;
+    u8* mapped_data;
+};
+
+struct AllocatedBuffer {
+    VkBuffer buffer;
+    GPUMemoryAllocation alloc;
+};
+
+struct AllocatedImage {
+    VkImage image;  
+    VkImageView image_view;
+    GPUMemoryAllocation alloc;
+};
+
+AllocatedBuffer graphicsMemoryAllocateBuffer(GraphicsMemoryAllocator* gpu_allocator, usize desired_size, VkBufferUsageFlags usage);
+AllocatedImage graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage);
+
+void graphicsMemoryFreeBuffer(GraphicsMemoryAllocator* gpu_allocator, AllocatedBuffer* allocated_buffer);
+void graphicsMemoryFreeImage(GraphicsMemoryAllocator* gpu_allocator, AllocatedImage* allocated_image);
 
 struct Frame {
     VkCommandPool cmd_pool;
@@ -34,14 +63,6 @@ struct Frame {
     VkImageView swapchain_image_view;
     VkImage depth_img;
     VkImageView depth_view;
-};
-
-// NOTE: This is a buffer in GPU-visible RAM,
-// for staging buffers or uniforms.
-struct SharedBuffer {
-    VkBuffer buffer;
-    usize buffer_size;
-    u8* mapped_data;
 };
 
 constexpr u32 STAGING_BUFFERS_PER_FRAME = 16;
@@ -67,7 +88,6 @@ struct Renderer {
     // NOTE: GPU-visible host RAM with small subdivision
     // for uniform buffers (e.g. matrices).
     GraphicsMemoryAllocator host_allocator;
-    u8* host_allocator_mapped;
 
     // NOTE: GPU-visible host RAM with big subdivisions,
     // for our staging buffers. We don't actually need
@@ -75,13 +95,12 @@ struct Renderer {
     // and allocated once at startup, but it's easier to
     // reuse the abstractions I already wrote.
     GraphicsMemoryAllocator staging_allocator;
-    u8* staging_allocator_mapped;
 
     // NOTE: There is number of staging buffers per frame for uploads.
     // I think it's better to separate per frames so you don't use a staging
     // buffer that's being copied from during the execution of frame A's
     // commands while you are recording frame B's commands.
-    SharedBuffer staging_buffers[FRAMES_IN_FLIGHT*STAGING_BUFFERS_PER_FRAME];
+    AllocatedBuffer staging_buffers[FRAMES_IN_FLIGHT*STAGING_BUFFERS_PER_FRAME];
     u32 distributed_staging_buffers;
 
     VkDescriptorPool global_desc_pool;
@@ -89,16 +108,9 @@ struct Renderer {
 
 b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena);
 // NOTE: Returns NULL if no more staging buffers available for this frame.
-SharedBuffer* rendererRequestStagingBuffer(Renderer* renderer);
-SharedBuffer rendererAllocateUniformBuffer(Renderer* renderer, usize uniform_size);
+AllocatedBuffer* rendererRequestStagingBuffer(Renderer* renderer);
 
 VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena* scratch_arena);
-
-struct GraphicsMemoryImageAllocation {
-    VkImage image;  
-    VkImageView image_view;
-};
-GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage);
 
 // NOTE: The simple pipelines we have now
 // only need one descriptor set, but that

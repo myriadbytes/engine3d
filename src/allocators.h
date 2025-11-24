@@ -119,11 +119,10 @@ struct BuddyAllocator {
     BuddyFreeList* pool_free_lists;
 };
 
-struct BuddyAllocationResult {
+struct BuddyAllocation {
     usize offset;
     usize size;
 };
-
 
 // NOTE: The buddy allocator takes an arena to store its metadata. I could do a
 // fully static version where the metadata size is computed at compile-time and
@@ -131,5 +130,5 @@ struct BuddyAllocationResult {
 // so it gets a little hairy. Eh. We'll see.
 void buddyInitalize(BuddyAllocator* allocator, Arena* metadata_arena, usize min_alloc_size, usize max_alloc_size, usize total_size);
 
-BuddyAllocationResult buddyAlloc(BuddyAllocator* allocator, usize size);
+BuddyAllocation buddyAlloc(BuddyAllocator* allocator, usize size);
 void buddyFree(BuddyAllocator* allocator, usize offset);

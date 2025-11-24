@@ -1,8 +1,6 @@
 #include <strsafe.h>
 
 #include "gpu.h"
-#include "world.h"
-#include "img.h"
 
 struct GraphicsMemoryAllocatorConfig {
     // FIXME: The initialization will look for a memory type with
@@ -69,29 +67,36 @@ b32 graphicsMemoryAllocatorInitialize(GraphicsMemoryAllocator* gpu_allocator, Vk
         config->total_size
     );
 
+    // NOTE: If the memory can be permanantly mapped, map it.
+    if (config->memory_properties ==
+        (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+        |VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+
+        VK_ASSERT(vkMapMemory(device, gpu_allocator->memory, 0, config->total_size, 0, (void**)&gpu_allocator->mapped));
+    }
+
+    // NOTE: Associate the allocator with a device. This makes
+    // it easy to allocate memory without needing to specify it.
     gpu_allocator->device = device;
 
     return true;
 }
 
-struct graphicsMemoryBufferAllocation {
-    VkBuffer buffer;    
-    usize buffer_size;
-    usize memory_offset;
-};
-
-graphicsMemoryBufferAllocation graphicsMemoryAllocateBuffer(GraphicsMemoryAllocator* gpu_allocator, usize desired_size, VkBufferUsageFlags usage) {
-    graphicsMemoryBufferAllocation result = {};
+AllocatedBuffer graphicsMemoryAllocateBuffer(GraphicsMemoryAllocator* gpu_allocator, usize desired_size, VkBufferUsageFlags usage) {
+    AllocatedBuffer result = {};
 
     // NOTE: Allocate the memory.
     // TODO: Log the difference between the desired size
     // and the actual allocation size here, to get an idea
     // of the wasted memory depending on allocator config.
-    BuddyAllocationResult alloc = buddyAlloc(&gpu_allocator->allocator, desired_size);
+    BuddyAllocation alloc = buddyAlloc(&gpu_allocator->allocator, desired_size);
     ASSERT(alloc.size >= desired_size);
 
-    result.buffer_size = alloc.size;
-    result.memory_offset = alloc.offset;
+    result.alloc.alloc_size = alloc.size;
+    result.alloc.alloc_offset = alloc.offset;
+    if (gpu_allocator->mapped != nullptr) {
+        result.alloc.mapped_data = gpu_allocator->mapped + alloc.offset;
+    }
 
     // NOTE: Create the buffer object and check its requirements
     // against the allocation.
@@ -114,8 +119,20 @@ graphicsMemoryBufferAllocation graphicsMemoryAllocateBuffer(GraphicsMemoryAlloca
     return result;
 }
 
-GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage) {
-    GraphicsMemoryImageAllocation result = {};
+void graphicsMemoryFreeBuffer(GraphicsMemoryAllocator* gpu_allocator, AllocatedBuffer* allocated_buffer) {
+    // NOTE: Do the allocation in reverse :
+    // - Destroy the buffer
+    // - Free the buddy alloc
+    // - Clear the AllocatedBuffer so no one holds onto
+    // stale references.    
+
+    vkDestroyBuffer(gpu_allocator->device, allocated_buffer->buffer, nullptr);
+    buddyFree(&gpu_allocator->allocator, allocated_buffer->alloc.alloc_offset);
+    *allocated_buffer = {};
+}
+
+AllocatedImage graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocator, VkFormat img_format, u32 img_width, u32 img_height, VkImageUsageFlags usage) {
+    AllocatedImage result = {};
 
     // NOTE: Create the image.
     VkImageCreateInfo img_info = {};
@@ -135,10 +152,17 @@ GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocato
     VkMemoryRequirements img_memory_reqs;
     vkGetImageMemoryRequirements(gpu_allocator->device, result.image, &img_memory_reqs);
 
-    BuddyAllocationResult alloc = buddyAlloc(&gpu_allocator->allocator, img_memory_reqs.size);
+    BuddyAllocation alloc = buddyAlloc(&gpu_allocator->allocator, img_memory_reqs.size);
 
     ASSERT(alloc.size >= img_memory_reqs.size);
     ASSERT(alloc.offset % img_memory_reqs.alignment == 0);
+
+    result.alloc.alloc_offset = alloc.offset;
+    result.alloc.alloc_size = alloc.size;
+    // TODO: Should we set the alloc.mapped member here ? There's
+    // nothing stopping us from doing so if the allocator's memory
+    // has been mapped, but I don't know why I would use a memory-mapped
+    // Vulkan image in Host memory.
 
     // NOTE: Bind the image to the allocation.
     VK_ASSERT(vkBindImageMemory(gpu_allocator->device, result.image, gpu_allocator->memory, alloc.offset));
@@ -157,26 +181,6 @@ GraphicsMemoryImageAllocation graphicsMemoryAllocateImage(GraphicsMemoryAllocato
     view_info.subresourceRange.layerCount = 1;
 
     VK_ASSERT(vkCreateImageView(gpu_allocator->device, &view_info, nullptr, &result.image_view));
-
-    return result;
-}
-
-SharedBuffer rendererAllocateUniformBuffer(Renderer* renderer, usize uniform_size) {
-    graphicsMemoryBufferAllocation allocation = graphicsMemoryAllocateBuffer(
-        &renderer->host_allocator,
-        uniform_size,
-        VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT
-    );
-
-    // NOTE: Uniforms range from 4 bytes (integer) to 64 bytes (matrices),
-    // so the allocator should be precise enough with such a reduce allocation
-    // range.
-    ASSERT(allocation.buffer_size == uniform_size);
-
-    SharedBuffer result = {};
-    result.buffer = allocation.buffer;
-    result.buffer_size = allocation.buffer_size;
-    result.mapped_data = renderer->host_allocator_mapped + allocation.memory_offset;
 
     return result;
 }
@@ -421,8 +425,6 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         &small_ram_config
     );
 
-    vkMapMemory(to_init->device, to_init->host_allocator.memory, 0, small_ram_config.total_size, 0, (void**)&to_init->host_allocator_mapped);
-
     GraphicsMemoryAllocatorConfig staging_ram_config = {};
     staging_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     staging_ram_config.min_alloc_size = MEGABYTES(1);
@@ -436,8 +438,6 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         static_arena,
         &staging_ram_config
     );
-
-    vkMapMemory(to_init->device, to_init->staging_allocator.memory, 0, staging_ram_config.total_size, 0, (void**)&to_init->staging_allocator_mapped);
 
     return true;
 }
@@ -468,7 +468,7 @@ b32 initDepth(Renderer* to_init) {
         VkMemoryRequirements img_memory_reqs;
         vkGetImageMemoryRequirements(to_init->device, frame_depth_img, &img_memory_reqs);
 
-        BuddyAllocationResult allocation = buddyAlloc(&to_init->vram_allocator.allocator, img_memory_reqs.size);
+        BuddyAllocation allocation = buddyAlloc(&to_init->vram_allocator.allocator, img_memory_reqs.size);
         ASSERT(allocation.size >= img_memory_reqs.size);
         ASSERT(allocation.offset % img_memory_reqs.alignment == 0);
 
@@ -516,17 +516,9 @@ b32 initDescPool(Renderer* to_init) {
 }
 
 b32 initStaging(Renderer* to_init) {
-    u8* staging_memory_cursor = to_init->staging_allocator_mapped;
 
-    for (u32 staging_idx = 0; staging_idx < ARRAY_COUNT(to_init->staging_buffers); staging_idx++) {
-        SharedBuffer& staging_buffer = to_init->staging_buffers[staging_idx];
-
-        graphicsMemoryBufferAllocation allocation = graphicsMemoryAllocateBuffer(&to_init->staging_allocator, STAGING_BUFFER_MIN_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);        
-        staging_buffer.buffer = allocation.buffer;
-        staging_buffer.buffer_size = allocation.buffer_size;
-        staging_buffer.mapped_data = staging_memory_cursor;
-
-        staging_memory_cursor += allocation.buffer_size;
+    for (AllocatedBuffer& staging_buffer : to_init->staging_buffers) {
+        staging_buffer = graphicsMemoryAllocateBuffer(&to_init->staging_allocator, STAGING_BUFFER_MIN_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);        
     }
 
     return true;  
@@ -547,7 +539,7 @@ b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, A
     return true;
 }
 
-SharedBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
+AllocatedBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
     if(renderer->distributed_staging_buffers >= STAGING_BUFFERS_PER_FRAME) {
         return nullptr;
     }
@@ -561,7 +553,7 @@ SharedBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
     // AFTER that vkWaitForFences call.
     u32 current_frame = renderer->frames_counter % FRAMES_IN_FLIGHT;
 
-    SharedBuffer* result = &renderer->staging_buffers[current_frame * STAGING_BUFFERS_PER_FRAME + renderer->distributed_staging_buffers];
+    AllocatedBuffer* result = &renderer->staging_buffers[current_frame * STAGING_BUFFERS_PER_FRAME + renderer->distributed_staging_buffers];
     renderer->distributed_staging_buffers++;
 
     return result;

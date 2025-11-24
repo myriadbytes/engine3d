@@ -68,12 +68,12 @@ void textRenderingInitialize(TextRenderingState* text_rendering_state, Renderer*
     text_rendering_state->bitmap_font_view = image_allocation.image_view;
 
     // NOTE: Get a staging buffer, and write the image bytes to it.
-    SharedBuffer* staging_buffer = rendererRequestStagingBuffer(renderer);
+    AllocatedBuffer* staging_buffer = rendererRequestStagingBuffer(renderer);
     ASSERT(staging_buffer != nullptr);
-    ASSERT(staging_buffer->buffer_size >= bitmap_width * bitmap_height * 4);
+    ASSERT(staging_buffer->alloc.alloc_size >= bitmap_width * bitmap_height * 4);
 
     for (u32 i = 0; i < bitmap_width * bitmap_height * 4; i++) {
-        staging_buffer->mapped_data[i] = bitmap_bytes[i];
+        staging_buffer->alloc.mapped_data[i] = bitmap_bytes[i];
     }
 
     // NOTE: Get the current frame's command buffer to record an upload
@@ -303,8 +303,8 @@ struct GameState {
     VulkanPipeline chunk_render_pipeline;
     // VulkanPipeline wireframe_render_pipeline;
 
-    SharedBuffer view_matrix_uniforms[FRAMES_IN_FLIGHT];
-    SharedBuffer projection_matrix_uniforms[FRAMES_IN_FLIGHT];
+    AllocatedBuffer view_matrix_uniforms[FRAMES_IN_FLIGHT];
+    AllocatedBuffer projection_matrix_uniforms[FRAMES_IN_FLIGHT];
 
     VkDescriptorSet matrices_desc_sets[FRAMES_IN_FLIGHT];
 
@@ -353,10 +353,10 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         // Also create a descriptor set that will point to that frame's uniforms.
         for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
             game_state->view_matrix_uniforms[frame_idx] =
-                rendererAllocateUniformBuffer(&game_state->renderer, sizeof(m4));
+                graphicsMemoryAllocateBuffer(&game_state->renderer.host_allocator, sizeof(m4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
             game_state->projection_matrix_uniforms[frame_idx] =
-                rendererAllocateUniformBuffer(&game_state->renderer, sizeof(m4));
+                graphicsMemoryAllocateBuffer(&game_state->renderer.host_allocator, sizeof(m4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
             VkDescriptorSetAllocateInfo set_alloc_info = {};
             set_alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -530,13 +530,13 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     }
 
     // NOTE: Iterate on all chunks from the pool and record copy commands
-    // for every chunk from that pool that needs it's mesh buffer updated.
+    // for every chunk from that pool that needs its mesh buffer updated.
     for (u32 chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
         Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
         if (!chunk->is_loaded) continue;
         if (!chunk->needs_remeshing) continue;
 
-        SharedBuffer* staging_buffer = rendererRequestStagingBuffer(&game_state->renderer);
+        AllocatedBuffer* staging_buffer = rendererRequestStagingBuffer(&game_state->renderer);
         // NOTE: No more staging buffers available !
         // The remaining chunks will have to wait for the next frame.
         if (staging_buffer == nullptr) break;
@@ -544,42 +544,48 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         usize generated_vertices;
         generateNaiveChunkMesh(
             chunk,
-            (ChunkVertex*)staging_buffer->mapped_data,
+            (ChunkVertex*)staging_buffer->alloc.mapped_data,
             &generated_vertices
         );
-        ASSERT(generated_vertices * sizeof(ChunkVertex) <= staging_buffer->buffer_size);
+        ASSERT(generated_vertices * sizeof(ChunkVertex) <= staging_buffer->alloc.alloc_size);
 
-        if (chunk->vertex_buffer_size < generated_vertices * sizeof(ChunkVertex)) {
-            if (chunk->vertex_buffer != nullptr) {
-                // NOTE: We need to de-allocate the buffer here.
-                ASSERT(false);
+        chunk->vertices_count = generated_vertices;
+
+        // NOTE: If the current vertex buffer is too small, we need to allocate a bigger one.
+        if (chunk->vertex_buffer.alloc.alloc_size < generated_vertices * sizeof(ChunkVertex)) {
+
+            // NOTE: Compute the size to allocate. If the buffer has never been allocated,
+            // we'll start at 32K. Otherwise, multiply the size by 2, so that we don't have
+            // to reallocate on every change. This is kinda like std::vector !
+            usize to_allocate_size = chunk->vertex_buffer.buffer != nullptr ? chunk->vertex_buffer.alloc.alloc_size : KILOBYTES(32);
+            while (to_allocate_size < generated_vertices * sizeof(ChunkVertex)) {
+                to_allocate_size *= 2;
             }
 
+            // NOTE: De-allocate the previous buffer.
+            if (chunk->vertex_buffer.buffer != nullptr) {
+                graphicsMemoryFreeBuffer(&game_state->renderer.vram_allocator, &chunk->vertex_buffer);
+            }
 
+            // NOTE: Allocate the new one.
+            chunk->vertex_buffer = graphicsMemoryAllocateBuffer(
+                &game_state->renderer.vram_allocator,
+                to_allocate_size,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+            );
         }
-    }
-    /*
-    if (game_state->test_chunk.needs_remeshing) {
-        game_state->test_chunk.needs_remeshing = false;
 
-        usize generated_vertices;
-        generateNaiveChunkMesh(
-            &game_state->test_chunk,
-            (ChunkVertex*)game_state->staging_memory_mapped,
-            &generated_vertices
-        );
-
-        game_state->test_chunk.vertices_count = generated_vertices;
-
+        // NOTE: Record the transfer.
         VkBufferCopy copy_region = {};
         copy_region.srcOffset = 0;
         copy_region.dstOffset = 0;
         copy_region.size = generated_vertices * sizeof(ChunkVertex);
 
-        vkCmdCopyBuffer(current_frame.cmd_buffer, game_state->staging_buffers[0], game_state->test_chunk.vertex_buffer, 1, &copy_region);
+        vkCmdCopyBuffer(current_frame.cmd_buffer, staging_buffer->buffer, chunk->vertex_buffer.buffer, 1, &copy_region);
 
-        // NOTE: Any vertex attributes reading stage after this barrier will have to
-        // wait on copy stages that wrote before the barrier.
+        // NOTE: Vertex attributes reading stages accessing this buffer after
+        // this barrier will have to wait on copy stages that wrote to it
+        // before the barrier.
         VkBufferMemoryBarrier2 transfer_barrier = {};
         transfer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
         transfer_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
@@ -588,7 +594,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         transfer_barrier.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT;
         transfer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         transfer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        transfer_barrier.buffer = game_state->test_chunk.vertex_buffer;
+        transfer_barrier.buffer = chunk->vertex_buffer.buffer;
         transfer_barrier.size = generated_vertices * sizeof(ChunkVertex);
 
         VkDependencyInfo transfer_barrier_dep_info = {};
@@ -598,7 +604,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         vkCmdPipelineBarrier2(current_frame.cmd_buffer, &transfer_barrier_dep_info);
     }
-    */
 
     // NOTE: Transition the framebuffer into a format suitable for rendering.
     VkImageMemoryBarrier2 render_barrier = {};
@@ -664,7 +669,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     vkCmdBeginRendering(current_frame.cmd_buffer, &rendering_info);
 
     // NOTE: Set the dynamic state shared by all draw commands.
-
     VkViewport viewport = {};
     viewport.x = 0;
     viewport.y = 0;
@@ -684,9 +688,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     vkCmdSetScissor(current_frame.cmd_buffer, 0, 1, &scissor);
 
     // NOTE: Update the matrices for this frame.
-    /*
-    m4* view_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->view_matrix_buffers_offsets[swapchain_img_idx]);
-    m4* projection_mat = (m4*)(game_state->uniforms_memory_mapped + game_state->projection_matrix_buffers_offsets[swapchain_img_idx]);
+    m4* view_mat = (m4*)(game_state->view_matrix_uniforms[swapchain_img_idx].alloc.mapped_data);
+    m4* projection_mat = (m4*)(game_state->projection_matrix_uniforms[swapchain_img_idx].alloc.mapped_data);
 
     *view_mat = lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
     *projection_mat = makeProjection(0.1, 1000, 90);
@@ -705,23 +708,27 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         nullptr
     );
 
-    m4 model_mat = makeTranslation(0, 0, 0);
+    // NOTE: Draw the chunks !
 
-    vkCmdPushConstants(
-        current_frame.cmd_buffer,
-        game_state->chunk_render_pipeline.layout,
-        VK_SHADER_STAGE_VERTEX_BIT,
-        0,
-        sizeof(m4),
-        &model_mat
-    );
+    for (u32 chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
+        Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
+        if (!chunk->is_loaded) continue;
 
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(current_frame.cmd_buffer, 0, 1, &game_state->test_chunk.vertex_buffer, &offset);
+        m4 model_mat = makeTranslation(chunkToWorldPos(chunk->chunk_position));
+        vkCmdPushConstants(
+            current_frame.cmd_buffer,
+            game_state->chunk_render_pipeline.layout,
+            VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            sizeof(m4),
+            &model_mat
+        );
 
-    vkCmdDraw(current_frame.cmd_buffer, game_state->test_chunk.vertices_count, 1, 0, 0);
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(current_frame.cmd_buffer, 0, 1, &chunk->vertex_buffer.buffer, &offset);
 
-    */
+        vkCmdDraw(current_frame.cmd_buffer, chunk->vertices_count, 1, 0, 0);
+    }
 
     // NOTE: Text rendering test.
     char debug_text_string[256];

@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include "maths.h"
+#include "gpu.h"
 
 constexpr i32 CHUNK_W = 16;
 
@@ -59,8 +60,7 @@ struct Chunk {
     b32 needs_remeshing;
     usize vertices_count;
 
-    VkBuffer vertex_buffer;
-    usize vertex_buffer_size;
+    AllocatedBuffer vertex_buffer;
 };
 
 // NOTE: The actual world will modeled using a hashmap that associates world
