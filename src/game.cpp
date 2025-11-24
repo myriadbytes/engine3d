@@ -393,37 +393,6 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         hashmapInitialize(&game_state->world_hashmap, chunkPositionHash);
         poolInitialize(&game_state->chunk_pool);
 
-        // NOTE: Initialize the test chunk.
-        Chunk* test_chunk = PoolAcquireItem(&game_state->chunk_pool);
-        *test_chunk = {};
-        test_chunk->chunk_position = v3i {0, 0, 1};
-        test_chunk->needs_remeshing = true;
-        test_chunk->is_loaded = true;
-
-        for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
-            u32 block_x = test_chunk->chunk_position.x() * CHUNK_W + (block_idx % CHUNK_W);
-            u32 block_y = test_chunk->chunk_position.y() * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
-            u32 block_z = test_chunk->chunk_position.z() * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
-
-            // TODO: This needs to be parameterized and put into a function.
-            // The fancy name is "fractal brownian motion", but it's just summing
-            // noise layers with reducing intensity and increasing frequency.
-            f32 space_scaling_factor = 0.01;
-            f32 height_intensity = 32.0;
-            f32 height = 0;
-            for (i32 octave = 0; octave < 5; octave ++) {
-                height += ((simplex_noise_2d(&game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
-                space_scaling_factor *= 2.f;
-                height_intensity /= 3.f;
-            }
-
-            if (block_y <= height) {
-                test_chunk->data[block_idx] = 1;
-            } else {
-                test_chunk->data[block_idx] = 0;
-            }
-        }
-
         memory->is_initialized = true;
     }
 
@@ -488,6 +457,88 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->orbit_mode = !game_state->orbit_mode;
     }
 
+    // NOTE: Unload chunks too far from the player.
+    for (usize chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
+        Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
+        if (!chunk->is_loaded) continue;
+
+        v3 chunk_to_unload_world_pos = chunkToWorldPos(chunk->chunk_position);
+        v3 chunk_to_unload_center_pos = chunk_to_unload_world_pos + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+        v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+        f32 dist = length(player_chunk_center_pos - chunk_to_unload_center_pos);
+        if (dist > (f32)LOAD_RADIUS * CHUNK_W) {
+
+            if (chunk->vertex_buffer.buffer != nullptr) {
+                graphicsMemoryFreeBuffer(&game_state->renderer.vram_allocator, &chunk->vertex_buffer);
+            }
+
+            hashmapRemove(&game_state->world_hashmap, chunk->chunk_position);
+            PoolReleaseItem(&game_state->chunk_pool, chunk);
+        }
+    }
+
+    // NOTE: Iterate over all chunk positions that should be loaded, and
+    // load them if they aren't.
+    v3i player_chunk_pos = worldPosToChunk(game_state->player_position);
+    for (i32 x = player_chunk_pos.x() - LOAD_RADIUS; x <= player_chunk_pos.x() + LOAD_RADIUS; x++) {
+        for (i32 y = player_chunk_pos.y() - LOAD_RADIUS; y <= player_chunk_pos.y() + LOAD_RADIUS; y++) {
+            for (i32 z = player_chunk_pos.z() - LOAD_RADIUS; z <= player_chunk_pos.z() + LOAD_RADIUS; z++) {
+
+                v3i chunk_to_load_pos = v3i {x, y, z};
+
+                v3 chunk_to_load_world_pos = chunkToWorldPos(chunk_to_load_pos);
+                v3 chunk_to_load_center_pos = chunk_to_load_world_pos + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+                v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
+
+                if (length(player_chunk_center_pos - chunk_to_load_center_pos) > (f32)LOAD_RADIUS * CHUNK_W) continue;
+                if (hashmapContains(&game_state->world_hashmap, chunk_to_load_pos)) continue;
+
+                // NOTE: Now we know that we need to load a new chunk.
+                Chunk* new_chunk = PoolAcquireItem(&game_state->chunk_pool);
+                hashmapInsert(&game_state->world_hashmap, chunk_to_load_pos, new_chunk);
+
+                // NOTE: Someone forgot to free VRAM...
+                ASSERT(new_chunk->vertex_buffer.buffer == nullptr);
+
+                *new_chunk = {};
+                new_chunk->is_loaded = true;
+                new_chunk->chunk_position = chunk_to_load_pos;                   
+                new_chunk->needs_remeshing = true;
+
+                for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
+                    u32 block_x = new_chunk->chunk_position.x() * CHUNK_W + (block_idx % CHUNK_W);
+                    u32 block_y = new_chunk->chunk_position.y() * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
+                    u32 block_z = new_chunk->chunk_position.z() * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
+
+                    // TODO: This needs to be parameterized and put into a function.
+                    // The fancy name is "fractal brownian motion", but it's just summing
+                    // noise layers with reducing intensity and increasing frequency.
+                    f32 space_scaling_factor = 0.01;
+                    f32 height_intensity = 32.0;
+                    f32 height = 0;
+                    for (i32 octave = 0; octave < 5; octave ++) {
+                        height += ((simplex_noise_2d(&game_state->simplex_table, (f32)block_x * space_scaling_factor, (f32) block_z * space_scaling_factor) + 1.f) / 2.f) * height_intensity;
+                        space_scaling_factor *= 2.f;
+                        height_intensity /= 3.f;
+                    }
+
+                    if (block_y <= height) {
+                        new_chunk->data[block_idx] = 1;
+                    } else {
+                        // TODO: We cleared the whole chunk
+                        // memory a dozen lines up, but should we ?
+                        // Or would it be better to define precise
+                        // chunk memory lifetimes so we know when
+                        // it has or has not been cleared ?
+                        // new_chunk->data[block_idx] = 0;
+                    }
+                }
+            }
+        }
+    }
     // RENDERING
 
     // NOTE: Wait until the work previously submitted by the frame is done.
@@ -541,6 +592,12 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         // The remaining chunks will have to wait for the next frame.
         if (staging_buffer == nullptr) break;
 
+        // WARNING: I originally forgot to put this !
+        // This needs to be before we continue in case
+        // of empty chunk, but after we break if there
+        // are no more staging buffers available.
+        chunk->needs_remeshing = false;
+
         usize generated_vertices;
         generateNaiveChunkMesh(
             chunk,
@@ -550,6 +607,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         ASSERT(generated_vertices * sizeof(ChunkVertex) <= staging_buffer->alloc.alloc_size);
 
         chunk->vertices_count = generated_vertices;
+
+        // NOTE: Empty chunk ! No need to bother with it.
+        if (chunk->vertices_count == 0) continue;
 
         // NOTE: If the current vertex buffer is too small, we need to allocate a bigger one.
         if (chunk->vertex_buffer.alloc.alloc_size < generated_vertices * sizeof(ChunkVertex)) {
@@ -735,13 +795,17 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     v3i chunk_position = worldPosToChunk(game_state->player_position);
     StringCbPrintf(debug_text_string,
         ARRAY_COUNT(debug_text_string),
-        "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d",
+        "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\nHashmap: %d/%d\nPool: %d/%d",
         game_state->player_position.x(),
         game_state->player_position.y(),
         game_state->player_position.z(),
         chunk_position.x(),
         chunk_position.y(),
-        chunk_position.z()
+        chunk_position.z(),
+        game_state->world_hashmap.nb_occupied,
+        WORLD_HASHMAP_SIZE,
+        game_state->chunk_pool.nb_allocated,
+        CHUNK_POOL_SIZE
     );
     drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame.cmd_buffer, debug_text_string, 0, 0);
 

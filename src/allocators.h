@@ -60,7 +60,12 @@ T* PoolAcquireItem(Pool<T, N>* pool) {
 
 template <typename T, usize N>
 void PoolReleaseItem(Pool<T, N>* pool, T* item) {
+    // NOTE: Assert that:
+    // - There is room for an item to be released
+    // - The pointer is indeed from the pool
     ASSERT(pool->free_stack_ptr < pool->free_stack + N);
+    ASSERT(item >= pool->slots);
+    ASSERT(item < pool->slots + N);
 
     // TRICKY: Pointer arithmetic here to get the slot index
     // from just the item adress.

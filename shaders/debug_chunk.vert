@@ -23,8 +23,9 @@ void main() {
     vec4 world_pos = model * vec4(in_position, 1.0);
     gl_Position = proj * view * world_pos;
 
+    // TODO: Research this whole linear <-> sRGB situation.
     vec4 mountain_color = vec4(1.0, 1.0, 1.0, 1.0);
-    vec4 grass_color    = vec4(0.3, 0.4, 0.3, 1.0);
+    vec4 grass_color    = vec4(0.073, 0.133, 0.073, 1.0);
 
     float t = pow(world_pos.y / (16.0 * 3.0), 4.0);
 
