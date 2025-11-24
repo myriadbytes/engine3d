@@ -8,7 +8,7 @@ game_dll_name = "game.dll"
 defines = {"ENGINE_SLOW": "1", "ENGINE_INTERNAL": "1"}
 compiler_flags = [
     "-g",
-    #    "-O3",
+    # "-O3",
     "-fdiagnostics-absolute-paths",
     "-Wall",
     "-Wno-missing-braces",

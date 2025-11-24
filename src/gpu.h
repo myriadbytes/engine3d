@@ -11,7 +11,7 @@
     {                              \
         VkResult err = statement;  \
         ASSERT(err == VK_SUCCESS); \
-    }                              \
+    }
 
 constexpr usize FRAMES_IN_FLIGHT = 2;
 constexpr u64 ONE_SECOND_TIMEOUT = 1'000'000'000;

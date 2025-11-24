@@ -195,7 +195,7 @@ struct TextShaderPushConstants {
 
 // TODO: Switch away from null-terminated strings.
 // NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
-void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_row, u32 start_col) {
+void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_col, u32 start_row) {
 
     // NOTE: Set up the pipeline.
     vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.pipeline);
@@ -223,27 +223,23 @@ void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBu
 
     // NOTE: The shader produce a quad that covers the whole screen.
     // We need to make it a quad of the right proportions and
-    // located in the first slot.
+    // located in the top left slot.
     m4 quad_setup_matrix =
-        makeTranslation((f32)start_col * char_width, (f32)start_row * char_height, 0)
-        * makeTranslation(-(1 - char_width), -1 + char_height / 2, 0)
+        makeTranslation(-(1 - char_width), -1 + char_height / 2, 0)
         * makeScale(char_width/2, char_height/2, 0);
 
-    i32 row = start_row;
     i32 col = start_col;
+    i32 row = start_row;
     for (int char_i = 0; text[char_i] != 0; char_i++) {
         u32 char_ascii_codepoint = (u32)text[char_i];
         if (char_ascii_codepoint == '\n') {
-            row = start_row;
-            col++;
+            col = start_col;
+            row++;
             continue;
         }
 
-        m4 char_translate = makeTranslation((f32)row * char_width, (f32)col * char_height , 0);
+        m4 char_translate = makeTranslation((f32)col * char_width, (f32)row * char_height , 0);
         m4 char_matrix = char_translate * quad_setup_matrix;
-
-        // TODO: Implement text wrapping here.
-        row++;
 
         TextShaderPushConstants push_constants = {};
         push_constants.transform = char_matrix;
@@ -251,6 +247,9 @@ void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBu
 
         vkCmdPushConstants(cmd_buf, text_rendering_state->text_pipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(TextShaderPushConstants), &push_constants);
         vkCmdDraw(cmd_buf, 6, 1, 0, 0);
+
+        // TODO: Implement text wrapping here.
+        col++;
     }
 }
 
@@ -393,6 +392,15 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         hashmapInitialize(&game_state->world_hashmap, chunkPositionHash);
         poolInitialize(&game_state->chunk_pool);
 
+        BuddyAllocator test_allocator;
+        buddyInitalize(
+            &test_allocator,
+            &game_state->frame_arena,
+            256,
+            KILOBYTES(1),
+            KILOBYTES(2)
+        );
+
         memory->is_initialized = true;
     }
 
@@ -467,6 +475,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         v3 player_chunk_center_pos = chunkToWorldPos(worldPosToChunk(game_state->player_position)) + v3 {(f32)CHUNK_W / 2, (f32)CHUNK_W / 2, (f32)CHUNK_W / 2};
 
+        // TODO: Maybe the unload distance should be greater than the load distance,
+        // so that if the player goes one direction and then walks back, we didn't
+        // have to unload and then load the chunk immediately after.
         f32 dist = length(player_chunk_center_pos - chunk_to_unload_center_pos);
         if (dist > (f32)LOAD_RADIUS * CHUNK_W) {
 
@@ -773,6 +784,9 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     for (u32 chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
         Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
         if (!chunk->is_loaded) continue;
+        if (chunk->vertices_count == 0) continue;
+
+        ASSERT(chunk->vertex_buffer.buffer != nullptr);
 
         m4 model_mat = makeTranslation(chunkToWorldPos(chunk->chunk_position));
         vkCmdPushConstants(
@@ -793,7 +807,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     // NOTE: Text rendering test.
     char debug_text_string[256];
     v3i chunk_position = worldPosToChunk(game_state->player_position);
-    StringCbPrintf(debug_text_string,
+    StringCbPrintfA(
+        debug_text_string,
         ARRAY_COUNT(debug_text_string),
         "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\nHashmap: %d/%d\nPool: %d/%d",
         game_state->player_position.x(),
@@ -807,7 +822,31 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->chunk_pool.nb_allocated,
         CHUNK_POOL_SIZE
     );
-    drawDebugTextOnScreen(&game_state->text_rendering_state, current_frame.cmd_buffer, debug_text_string, 0, 0);
+    drawDebugTextOnScreen(
+        &game_state->text_rendering_state,
+        current_frame.cmd_buffer,
+        debug_text_string,
+        0, 0
+    );
+
+    char debug_vram_usage_string[256];
+    usize vram_usage = buddyMeasure(&game_state->renderer.vram_allocator.allocator);
+    ASSERT(vram_usage >= MEGABYTES(1));
+    vram_usage /= MEGABYTES(1);
+
+    StringCbPrintfA(
+        debug_vram_usage_string,
+        ARRAY_COUNT(debug_vram_usage_string),
+        "VRAM Usage:\n%llu / %llu MB",
+        vram_usage,
+        game_state->renderer.vram_allocator.allocator.total_size / MEGABYTES(1)
+    );
+    drawDebugTextOnScreen(
+        &game_state->text_rendering_state,
+        current_frame.cmd_buffer,
+        debug_vram_usage_string,
+        0, 5
+    );
 
     vkCmdEndRendering(current_frame.cmd_buffer);
 

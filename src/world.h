@@ -29,7 +29,7 @@ constexpr v3 chunkToWorldPos(v3i chunk_pos) {
 // NOTE: How many chunks to load around the player, in ALL 3 directions.
 // A radius of 1 would mean 7 chunks in a diamond pattern, the center one
 // being the chunk the player is inside.
-constexpr i32 LOAD_RADIUS = 5;
+constexpr i32 LOAD_RADIUS = 8;
 
 // NOTE: We'll allocate a pool of chunks at startup, so that there is no memory
 // allocation for the chunk backing data at runtime. We can affort to do this

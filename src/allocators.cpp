@@ -238,3 +238,37 @@ void buddyFree(BuddyAllocator* allocator, usize offset) {
     slot->pool_idx = pool_idx;
     buddyUtilsAddHeadToFreeList(allocator, slot_idx);
 }
+
+usize buddyMeasure(BuddyAllocator* allocator) {
+    usize free_space = 0;   
+
+    usize pool_slot_size = allocator->min_alloc_size;
+    usize pool_idx = 0;
+
+    while (pool_idx < allocator->pool_count) {
+        u32 head = allocator->pool_free_lists[pool_idx].head_idx;
+        u32 tail = allocator->pool_free_lists[pool_idx].tail_idx;
+
+        // NOTE: Nothing free in that pool, so it is either
+        // full or not yet created by subdividing a bigger pool.
+        if (head == UINT32_MAX) {
+            pool_idx++;
+            pool_slot_size *= 2;
+            continue;
+        };
+
+        u32 slot_idx = head;
+        while (slot_idx <= tail) {
+            BuddySlotMetadata& slot = allocator->slots_meta[slot_idx]; 
+            ASSERT(slot.freelist_valid && !slot.allocated);
+
+            free_space += pool_slot_size;
+            slot_idx = slot.next_idx;
+        }
+
+        pool_idx++;
+        pool_slot_size *= 2;
+    }
+
+    return allocator->total_size - free_space;
+}
