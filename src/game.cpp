@@ -784,7 +784,20 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     for (u32 chunk_idx = 0; chunk_idx < CHUNK_POOL_SIZE; chunk_idx++) {
         Chunk* chunk = &game_state->chunk_pool.slots[chunk_idx];
         if (!chunk->is_loaded) continue;
+
+        // NOTE: Do not issue a draw call for empty chunks.
         if (chunk->vertices_count == 0) continue;
+
+        // NOTE: Very basic "frustum culling" : just check if the chunk is
+        // behind the camera. Since this uses the chunk center position,
+        // it can cull visible chunks. Too bad !
+        // TODO: This should obviously be turned into a real frustum culling
+        // algorithm, that takes into account the FOV and frustum shape.
+        v3 chunk_world_pos = chunkToWorldPos(chunk->chunk_position) + v3 {(f32) CHUNK_W/2, (f32) CHUNK_W/2, (f32) CHUNK_W/2};
+        v3 chunk_dir = normalize(chunk_world_pos - game_state->player_position);
+        if (dot(game_state->camera_forward, chunk_dir) < 0.0f) {
+            continue;
+        }
 
         ASSERT(chunk->vertex_buffer.buffer != nullptr);
 
