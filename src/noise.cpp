@@ -32,8 +32,8 @@ void simplex_table_from_seed(SimplexTable* to_init, u64 seed) {
     }
 }
 
-inline u8 perm_hash(SimplexTable* simplex_state, u32 i) {
-    return simplex_state->permutations[i & 0xFF];
+inline i32 perm_hash(SimplexTable* simplex_state, i32 i) {
+    return (i32)simplex_state->permutations[i & 0xFF];
 }
 
 inline i32 fastfloor(f32 x) {

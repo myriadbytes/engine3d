@@ -278,7 +278,7 @@ void chunkPipelineInitialize(Renderer* renderer, VulkanPipeline* to_create, Aren
     pipelineBuilderAddPushConstant(&builder, sizeof(m4), VK_SHADER_STAGE_VERTEX_BIT);
 
     pipelineBuilderCreatePipeline(&builder, renderer->device, to_create);
-    
+
     vkDestroyShaderModule(renderer->device, chunk_vert_shader, nullptr);
     vkDestroyShaderModule(renderer->device, chunk_frag_shader, nullptr);
 }
@@ -371,7 +371,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
             buffer_desc_infos[1].buffer = game_state->projection_matrix_uniforms[frame_idx].buffer;
             buffer_desc_infos[1].offset = 0;
             buffer_desc_infos[1].range = sizeof(m4);
-            
+
             VkWriteDescriptorSet set_writes[2] = {};
             set_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             set_writes[0].dstSet = game_state->matrices_desc_sets[frame_idx];
@@ -516,13 +516,13 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
                 *new_chunk = {};
                 new_chunk->is_loaded = true;
-                new_chunk->chunk_position = chunk_to_load_pos;                   
+                new_chunk->chunk_position = chunk_to_load_pos;
                 new_chunk->needs_remeshing = true;
 
                 for(usize block_idx = 0; block_idx < CHUNK_W * CHUNK_W * CHUNK_W; block_idx++){
-                    u32 block_x = new_chunk->chunk_position.x() * CHUNK_W + (block_idx % CHUNK_W);
-                    u32 block_y = new_chunk->chunk_position.y() * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
-                    u32 block_z = new_chunk->chunk_position.z() * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
+                    i64 block_x = (i64)new_chunk->chunk_position.x() * CHUNK_W + (block_idx % CHUNK_W);
+                    i64 block_y = (i64)new_chunk->chunk_position.y() * CHUNK_W + (block_idx / CHUNK_W) % (CHUNK_W);
+                    i64 block_z = (i64)new_chunk->chunk_position.z() * CHUNK_W + (block_idx / (CHUNK_W * CHUNK_W));
 
                     // TODO: This needs to be parameterized and put into a function.
                     // The fancy name is "fractal brownian motion", but it's just summing
@@ -536,7 +536,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
                         height_intensity /= 3.f;
                     }
 
-                    if (block_y <= height) {
+                    if (block_y <= height && block_y >= -10) {
                         new_chunk->data[block_idx] = 1;
                     } else {
                         // TODO: We cleared the whole chunk
