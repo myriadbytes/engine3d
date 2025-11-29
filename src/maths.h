@@ -281,11 +281,12 @@ inline m4 makeScale(v3 a) {
 }
 
 m4 lookAt(v3 eye, v3 target);
-m4 makeProjection(f32 near, f32 far, f32 fov);
+m4 makeProjection(f32 near, f32 far, f32 fov, f32 aspect);
 
 // GENERAL
 
-inline f32 clamp(f32 x, f32 min, f32 max) {
+template< typename T>
+constexpr T clamp(T x, T min, T max) {
     if (x < min) return min;
     if (x > max) return max;
     return x;

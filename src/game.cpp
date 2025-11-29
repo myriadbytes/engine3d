@@ -195,7 +195,7 @@ struct TextShaderPushConstants {
 
 // TODO: Switch away from null-terminated strings.
 // NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
-void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_col, u32 start_row) {
+void drawDebugTextOnScreen(Renderer* renderer, TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_col, u32 start_row) {
 
     // NOTE: Set up the pipeline.
     vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.pipeline);
@@ -217,9 +217,18 @@ void drawDebugTextOnScreen(TextRenderingState* text_rendering_state, VkCommandBu
     // space of 3 pixels. Most chars are also vertically centered, due to the
     // ascender/descender pair.
     constexpr f32 char_ratio = 6.f / 12.f;
-    constexpr f32 char_scale = 0.04f; // TODO: Make this configurable ?
-    constexpr f32 char_width = (char_ratio * char_scale) * 2;
-    constexpr f32 char_height = (char_scale) * 2;
+
+    // NOTE: Debug chars should be the same size no matter the window size,
+    // because we don't want the text to get too big when toggling fullscreen
+    // or too small when reducing the window size.
+    // TODO: Make this configurable at runtime.
+    f32 char_scale = 30.0f / renderer->swapchain_width;
+    f32 aspect_ratio =
+        (f32)renderer->swapchain_width
+        / (f32)renderer->swapchain_height;
+
+    f32 char_width = char_scale * 2 * char_ratio;
+    f32 char_height = char_scale * 2 * aspect_ratio;
 
     // NOTE: The shader produce a quad that covers the whole screen.
     // We need to make it a quad of the right proportions and
@@ -319,7 +328,7 @@ struct GameState {
 };
 
 extern "C"
-void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
+void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, InputState* input) {
     ASSERT(memory->permanent_storage_size >= sizeof(GameState));
     GameState* game_state = (GameState*)memory->permanent_storage;
 
@@ -333,6 +342,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
         ASSERT(rendererInitialize(
             &game_state->renderer,
+            platform_state,
             true,
             &game_state->static_arena,
             &game_state->frame_arena)
@@ -552,15 +562,21 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     }
     // RENDERING
 
+    // NOTE: Handle swapchain resizing.
+    if (platform_state->surface_has_been_resized) {
+        rendererResizeSwapchain(&game_state->renderer, platform_state);
+    }
+
     // NOTE: Wait until the work previously submitted by the frame is done.
-    Frame& current_frame = game_state->renderer.frames[game_state->renderer.frames_counter % FRAMES_IN_FLIGHT];
+    u32 current_frame_idx = game_state->renderer.frames_counter % FRAMES_IN_FLIGHT;
+    Frame& current_frame = game_state->renderer.frames[current_frame_idx];
     VK_ASSERT(vkWaitForFences(game_state->renderer.device, 1, &current_frame.render_fence, true, ONE_SECOND_TIMEOUT));
     VK_ASSERT(vkResetFences(game_state->renderer.device, 1, &current_frame.render_fence));
 
     // NOTE: Request an image from the swapchain that we can use for rendering.
     u32 swapchain_img_idx;
-    VK_ASSERT(vkAcquireNextImageKHR(game_state->renderer.device, game_state->renderer.swapchain, ONE_SECOND_TIMEOUT, current_frame.swapchain_semaphore, nullptr, &swapchain_img_idx));
-    ASSERT(swapchain_img_idx == (game_state->renderer.frames_counter % FRAMES_IN_FLIGHT));
+    VkResult acquire_err = vkAcquireNextImageKHR(game_state->renderer.device, game_state->renderer.swapchain, ONE_SECOND_TIMEOUT, current_frame.swapchain_semaphore, nullptr, &swapchain_img_idx);
+    ASSERT(acquire_err == VK_SUCCESS);
 
     // TODO: This needs to be put somewhere else.
     game_state->renderer.distributed_staging_buffers = 0;
@@ -694,7 +710,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         .baseArrayLayer = 0,
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
-    render_barrier.image = current_frame.swapchain_image;
+    render_barrier.image = game_state->renderer.swapchain_images[swapchain_img_idx];
 
     VkDependencyInfo render_dep_info = {};
     render_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -708,7 +724,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     VkRenderingAttachmentInfo render_target_info = {};
     render_target_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    render_target_info.imageView = current_frame.swapchain_image_view;
+    render_target_info.imageView = game_state->renderer.swapchain_image_views[swapchain_img_idx];
     render_target_info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     render_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     render_target_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -716,7 +732,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     VkRenderingAttachmentInfo depth_target_info = {};
     depth_target_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    depth_target_info.imageView = current_frame.depth_view;
+    depth_target_info.imageView = current_frame.depth_img.image_view;
     depth_target_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     depth_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth_target_info.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -724,10 +740,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
 
     // TODO: Have a way to get the window dimensions without going to the OS...
     VkRect2D render_area = {};
-    RECT client_rect;
-    GetClientRect(game_state->renderer.window, &client_rect);
-    render_area.extent.height = client_rect.bottom;
-    render_area.extent.width = client_rect.right;
+    render_area.extent.width = game_state->renderer.swapchain_width;
+    render_area.extent.height = game_state->renderer.swapchain_height;
 
     VkRenderingInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -743,8 +757,8 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     VkViewport viewport = {};
     viewport.x = 0;
     viewport.y = 0;
-    viewport.width = client_rect.right;
-    viewport.height = client_rect.bottom;
+    viewport.width = game_state->renderer.swapchain_width;
+    viewport.height = game_state->renderer.swapchain_height;
     viewport.minDepth = 0.f;
     viewport.maxDepth = 1.f;
 
@@ -753,17 +767,19 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
     VkRect2D scissor = {};
     scissor.offset.x = 0;
     scissor.offset.y = 0;
-    scissor.extent.width = client_rect.right;
-    scissor.extent.height = client_rect.bottom;
+    scissor.extent.width = game_state->renderer.swapchain_width;
+    scissor.extent.height = game_state->renderer.swapchain_height;
 
     vkCmdSetScissor(current_frame.cmd_buffer, 0, 1, &scissor);
 
     // NOTE: Update the matrices for this frame.
+    f32 aspect_ratio = (f32)game_state->renderer.swapchain_width / (f32)game_state->renderer.swapchain_height;
+
     m4* view_mat = (m4*)(game_state->view_matrix_uniforms[swapchain_img_idx].alloc.mapped_data);
     m4* projection_mat = (m4*)(game_state->projection_matrix_uniforms[swapchain_img_idx].alloc.mapped_data);
 
     *view_mat = lookAt(game_state->player_position, game_state->player_position + game_state->camera_forward);
-    *projection_mat = makeProjection(0.1, 1000, 90);
+    *projection_mat = makeProjection(0.1, 1000, 90, aspect_ratio);
 
     // NOTE: Bind the pipeline and the descriptor set for the frame-constant matrices.
     vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
@@ -836,6 +852,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         CHUNK_POOL_SIZE
     );
     drawDebugTextOnScreen(
+        &game_state->renderer,
         &game_state->text_rendering_state,
         current_frame.cmd_buffer,
         debug_text_string,
@@ -855,6 +872,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         game_state->renderer.vram_allocator.allocator.total_size / MEGABYTES(1)
     );
     drawDebugTextOnScreen(
+        &game_state->renderer,
         &game_state->text_rendering_state,
         current_frame.cmd_buffer,
         debug_vram_usage_string,
@@ -881,7 +899,7 @@ void gameUpdate(f32 dt, GameMemory* memory, InputState* input) {
         .baseArrayLayer = 0,
         .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
-    present_barrier.image = current_frame.swapchain_image;
+    present_barrier.image = game_state->renderer.swapchain_images[swapchain_img_idx];
 
     VkDependencyInfo present_dep_info = {};
     present_dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;

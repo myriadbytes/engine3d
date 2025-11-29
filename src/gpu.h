@@ -6,6 +6,7 @@
 
 #include "common.h"
 #include "allocators.h"
+#include "game_api.h"
 
 #define VK_ASSERT(statement)       \
     {                              \
@@ -59,10 +60,7 @@ struct Frame {
     VkSemaphore render_semaphore;
     VkFence render_fence;
 
-    VkImage swapchain_image;
-    VkImageView swapchain_image_view;
-    VkImage depth_img;
-    VkImageView depth_view;
+    AllocatedImage depth_img;
 };
 
 constexpr u32 STAGING_BUFFERS_PER_FRAME = 16;
@@ -76,7 +74,17 @@ struct Renderer {
     VkPhysicalDevice physical_device;
     VkDevice device;
     VkQueue queue;
+
+    VkFormat surface_format;
+    VkColorSpaceKHR surface_space;
+    VkPresentModeKHR surface_present_mode;
+    VkSurfaceTransformFlagBitsKHR surface_transform;
+
     VkSwapchainKHR swapchain;
+    i32 swapchain_width;
+    i32 swapchain_height;
+    VkImage swapchain_images[FRAMES_IN_FLIGHT];
+    VkImageView swapchain_image_views[FRAMES_IN_FLIGHT];
 
     Frame frames[FRAMES_IN_FLIGHT];
     u64 frames_counter;
@@ -106,7 +114,8 @@ struct Renderer {
     VkDescriptorPool global_desc_pool;
 };
 
-b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena);
+b32 rendererInitialize(Renderer* to_init, GamePlatformState* platform_state, b32 debug_mode, Arena* static_arena, Arena* scratch_arena);
+b32 rendererResizeSwapchain(Renderer* renderer, GamePlatformState* platform_state);
 // NOTE: Returns NULL if no more staging buffers available for this frame.
 AllocatedBuffer* rendererRequestStagingBuffer(Renderer* renderer);
 

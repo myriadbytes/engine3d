@@ -21,6 +21,7 @@ using namespace GameInput::v3;
 #include "game_api.h"
 
 global b32 global_running = false;
+global GamePlatformState platform_state = {};
 
 // NOTE: Due to the way Microsoft's GameInput works, we need to keep
 // more state around than what we want to present to the game.
@@ -261,6 +262,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
         } break;
 
+        case WM_SIZE: {
+            i32 new_width = LOWORD(lParam);
+            i32 new_height = HIWORD(lParam);
+
+            platform_state.surface_has_been_resized = true;
+            platform_state.surface_width = new_width;
+            platform_state.surface_height = new_height;
+
+            return 0;
+        } break;
+
         default:
             return DefWindowProcA(hwnd, uMsg, wParam, lParam);
     }
@@ -276,12 +288,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     window_class.lpfnWndProc = WindowProc;
     RegisterClassA(&window_class);
 
+    constexpr i32 DEFAULT_WINDOW_WIDTH = 800;
+    constexpr i32 DEFAULT_WINDOW_HEIGHT = 800;
+
     HWND window = CreateWindowExA(
         /* behavior */ 0,
         window_class.lpszClassName,
         "WIN32 Window",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        /* position & size */ CW_USEDEFAULT, CW_USEDEFAULT, 800, 800,
+        /* position */ CW_USEDEFAULT, CW_USEDEFAULT,
+        /* size */ DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT,
         /* parent window */ NULL,
         /* menu */ NULL,
         hInstance,
@@ -344,7 +360,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (game_code.is_valid) {
             // TODO: Compute the actual dt, smoothed over multiple frames to avoid stuttering.
             // SEE: https://x.com/FlohOfWoe/status/1810937083533443251
-            game_code.game_update(1.f/60.f, &game_memory, &current_input_state->input_state);
+            game_code.game_update(1.f/60.f, &platform_state, &game_memory, &current_input_state->input_state);
         }
 
         // NOTE: Swap the user input buffers

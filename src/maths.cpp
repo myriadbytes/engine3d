@@ -27,21 +27,21 @@ m4 lookAt(v3 eye, v3 target) {
     return result;
 }
 
-m4 makeProjection(f32 near, f32 far, f32 fov) {
-    // NOTE: This is a good reference, but the matrices on the site are printed column-major (the opposite of a normal math book).
-    // https://www.scratchapixel.com/lessons/3d-basic-rendering/perspective-and-orthographic-projection-matrix/building-basic-perspective-projection-matrix.html
+m4 makeProjection(f32 near, f32 far, f32 fov, f32 aspect) {
 
-    // FIXME: add aspect ratio
-    f32 S = 1.f / (
+    f32 f = 1.f / (
         tanf((fov/2) * (PI32 / 180))
     );
 
-    // WARNING: The (1,1) component is negated to account for the fact that
-    // Vulkan's NDC is +Y down. Maybe the right approach is to flip Vulkan's
-    // viewport ?
+    // WARNING: The y component is negated to account for the fact that Vulkan's
+    // NDC is +Y down. Maybe the right approach is to flip Vulkan's viewport ?
+    // Or at least make the flipping a parameter of this function.
+    f32 fx = f / aspect;
+    f32 fy = -f;
+
     return m4 {
-        S, 0, 0, 0,
-        0, -S, 0, 0,
+        fx, 0, 0, 0,
+        0, fy, 0, 0,
         0, 0, -(far / (far - near)), -1,
         0, 0, -((far * near) / (far - near)), 0
     };

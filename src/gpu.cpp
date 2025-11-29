@@ -185,6 +185,19 @@ AllocatedImage graphicsMemoryAllocateImage(GraphicsMemoryAllocator* gpu_allocato
     return result;
 }
 
+void graphicsMemoryFreeImage(GraphicsMemoryAllocator* gpu_allocator, AllocatedImage* allocated_image) {
+    // NOTE: Do the allocation in reverse :
+    // - Destroy the image view
+    // - Destroy the image
+    // - Free the allocator memory
+    // - Clear the AllocatedImage to prevent referencing destroyed resources
+
+    vkDestroyImageView(gpu_allocator->device, allocated_image->image_view, nullptr);
+    vkDestroyImage(gpu_allocator->device, allocated_image->image, nullptr);
+    buddyFree(&gpu_allocator->allocator, allocated_image->alloc.alloc_offset);
+    *allocated_image = {};
+}
+
 b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
     // NOTE: Vulkan instance creation.
     VkApplicationInfo app_info = {};
@@ -254,7 +267,7 @@ b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
     return true;
 }
 
-b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
+b32 initSurface(Renderer* to_init, Arena* scratch_arena) {
     // NOTE: Surface creation.
     // WARNING: Getting the handles like that is error prone, but it's convenient
     // for now.
@@ -265,7 +278,8 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
     surface_info.hwnd = to_init->window;
     VK_ASSERT(vkCreateWin32SurfaceKHR(to_init->instance, &surface_info, nullptr, &to_init->surface));
 
-    // NOTE: Swapchain creation.
+    // NOTE: Query capabilities and find good options
+    // for format and presentation mode.
     VkSurfaceCapabilitiesKHR surface_caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(to_init->physical_device, to_init->surface, &surface_caps);
 
@@ -285,6 +299,9 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
         }
     }
     ASSERT(found_suitable_format);
+    to_init->surface_format = VK_FORMAT_B8G8R8A8_SRGB;
+    to_init->surface_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    to_init->surface_transform = surface_caps.currentTransform;
 
     // TODO: Support more presentation modes ? Vsync is fine for now but
     // maybe it would be better to run in Mailbox and handle the frame pacing
@@ -304,6 +321,7 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
         }
     }
     ASSERT(found_suitable_present_mode);
+    to_init->surface_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 
     // TODO: Vulkan-Tutorial says: "However, simply sticking to this minimum means
     // that we may sometimes have to wait on the driver to complete internal operations
@@ -312,18 +330,24 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
     // Should we use 3 framebuffers ?
     ASSERT(surface_caps.minImageCount <= FRAMES_IN_FLIGHT && (surface_caps.maxImageCount >= FRAMES_IN_FLIGHT || surface_caps.maxImageCount == 0));
 
+    return true;
+}
+
+b32 initSwapchain(Renderer* to_init, i32 width, i32 height) {
+
     VkSwapchainCreateInfoKHR swapchain_create_info = {};
     swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     swapchain_create_info.surface = to_init->surface;
-    swapchain_create_info.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
-    swapchain_create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-    swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swapchain_create_info.imageFormat = to_init->surface_format;
+    swapchain_create_info.imageColorSpace = to_init->surface_space;
+    swapchain_create_info.presentMode = to_init->surface_present_mode;
     swapchain_create_info.minImageCount = FRAMES_IN_FLIGHT;
-    swapchain_create_info.imageExtent = surface_caps.currentExtent;
+    swapchain_create_info.imageExtent.width = width;
+    swapchain_create_info.imageExtent.height = height;
     swapchain_create_info.imageArrayLayers = 1;
     swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     swapchain_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    swapchain_create_info.preTransform = surface_caps.currentTransform;
+    swapchain_create_info.preTransform = to_init->surface_transform;
     swapchain_create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     swapchain_create_info.clipped = VK_TRUE;
     swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
@@ -334,17 +358,14 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
     // FIXME: Apparently the driver is allowed to create more images than what we asked for. We should
     // support that eventually.
     ASSERT(swapchain_images_count == FRAMES_IN_FLIGHT);
-    VkImage swapchain_images[FRAMES_IN_FLIGHT];
-    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, swapchain_images);
 
-    // NOTE: For each frame, associate the VkImage and create the VkImageView.
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        
-        to_init->frames[frame_idx].swapchain_image = swapchain_images[frame_idx];
+    // NOTE: Get the VkImages for the swapchain images, and create the VkImageViews.
+    vkGetSwapchainImagesKHR(to_init->device, to_init->swapchain, &swapchain_images_count, to_init->swapchain_images);
+    for (u32 swapchain_img_idx = 0; swapchain_img_idx < FRAMES_IN_FLIGHT; swapchain_img_idx++) {
 
         VkImageViewCreateInfo swapchain_view_info = {};
         swapchain_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        swapchain_view_info.image = to_init->frames[frame_idx].swapchain_image;
+        swapchain_view_info.image = to_init->swapchain_images[swapchain_img_idx];
         swapchain_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         swapchain_view_info.format = VK_FORMAT_B8G8R8A8_SRGB;
         swapchain_view_info.subresourceRange = {
@@ -354,10 +375,31 @@ b32 initSwapchain(Renderer* to_init, Arena* scratch_arena) {
             .baseArrayLayer = 0,
             .layerCount = 1
         };
-        vkCreateImageView(to_init->device, &swapchain_view_info, nullptr, &to_init->frames[frame_idx].swapchain_image_view);
+        vkCreateImageView(to_init->device, &swapchain_view_info, nullptr, &to_init->swapchain_image_views[swapchain_img_idx]);
     }
 
+    to_init->swapchain_width = width;
+    to_init->swapchain_height = height;
+
     return true;   
+}
+
+b32 cleanupSwapchain(Renderer* renderer) {
+
+    for (VkImageView& img_view : renderer->swapchain_image_views) {
+        vkDestroyImageView(renderer->device, img_view, nullptr);
+        img_view = nullptr;
+    }
+
+    vkDestroySwapchainKHR(renderer->device, renderer->swapchain, nullptr);
+    for (VkImage& img : renderer->swapchain_images) {
+        img = nullptr;
+    }
+
+    renderer->swapchain_width = 0;
+    renderer->swapchain_height = 0;
+
+    return true;
 }
 
 b32 initCmdAndSync(Renderer* to_init) {
@@ -397,10 +439,17 @@ b32 initCmdAndSync(Renderer* to_init) {
 }
 
 b32 initAllocation(Renderer* to_init, Arena* static_arena) {
+    // NOTE: The largest VRAM allocation we do now are the depth
+    // render targets, which can individually be up to 8MB with a
+    // 1920x1080 swapchain. Since the main VRAM allocations now are
+    // textures and vertex buffers, maybe it would be better to
+    // make two VRAM allocators, one for small allocations (< 4MB)
+    // and one for large (> 4 MB). But for now we just have one
+    // allocator with way too many buddy subdivisions.
     GraphicsMemoryAllocatorConfig large_vram_config = {};
     large_vram_config.memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     large_vram_config.min_alloc_size = KILOBYTES(32);
-    large_vram_config.max_alloc_size = MEGABYTES(4);
+    large_vram_config.max_alloc_size = MEGABYTES(8);
     large_vram_config.total_size = MEGABYTES(256);
 
     graphicsMemoryAllocatorInitialize(
@@ -411,6 +460,8 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         &large_vram_config
     );
 
+    // NOTE: This is for uniform buffers, between 4 and 64 bytes for
+    // scalars and matrices respectively.
     GraphicsMemoryAllocatorConfig small_ram_config = {};
     small_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     small_ram_config.min_alloc_size = BYTES(4);
@@ -425,6 +476,7 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
         &small_ram_config
     );
 
+    // NOTE: This is for the staging buffers used during GPU transfer.
     GraphicsMemoryAllocatorConfig staging_ram_config = {};
     staging_ram_config.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     staging_ram_config.min_alloc_size = MEGABYTES(1);
@@ -443,49 +495,24 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
 }
 
 b32 initDepth(Renderer* to_init) {
-    RECT client_rect;
-    GetClientRect(to_init->window, &client_rect);
 
-    for (u32 frame_idx = 0; frame_idx < FRAMES_IN_FLIGHT; frame_idx++) {
-        VkImage& frame_depth_img = to_init->frames[frame_idx].depth_img;
-        VkImageView& frame_depth_view = to_init->frames[frame_idx].depth_view;
+    // NOTE: Create the image and view with the right usage / format.
+    for (Frame& frame : to_init->frames) {
+        frame.depth_img = graphicsMemoryAllocateImage(
+            &to_init->vram_allocator,
+            VK_FORMAT_D32_SFLOAT,
+            to_init->swapchain_width,
+            to_init->swapchain_height,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+        );
+    }
 
-        // NOTE: Create the image.
-        VkImageCreateInfo img_info = {};
-        img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        img_info.imageType = VK_IMAGE_TYPE_2D;
-        img_info.format = VK_FORMAT_D32_SFLOAT;
-        img_info.extent = {(u32)client_rect.right, (u32)client_rect.bottom, 1};
-        img_info.mipLevels = 1;
-        img_info.arrayLayers = 1;
-        img_info.samples = VK_SAMPLE_COUNT_1_BIT;
-        img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        img_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    return true;
+}
 
-        VK_ASSERT(vkCreateImage(to_init->device, &img_info, nullptr, &frame_depth_img));
-
-        // NOTE: Allocate the memory, checking the allocation meets the requirements.
-        VkMemoryRequirements img_memory_reqs;
-        vkGetImageMemoryRequirements(to_init->device, frame_depth_img, &img_memory_reqs);
-
-        BuddyAllocation allocation = buddyAlloc(&to_init->vram_allocator.allocator, img_memory_reqs.size);
-        ASSERT(allocation.size >= img_memory_reqs.size);
-        ASSERT(allocation.offset % img_memory_reqs.alignment == 0);
-
-        VK_ASSERT(vkBindImageMemory(to_init->device, frame_depth_img, to_init->vram_allocator.memory, allocation.offset));
-
-        // NOTE: Create the image view for rendering.
-        VkImageViewCreateInfo view_info = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view_info.image = frame_depth_img;
-        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = VK_FORMAT_D32_SFLOAT;
-        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        view_info.subresourceRange.baseMipLevel = 0;
-        view_info.subresourceRange.levelCount = 1;
-        view_info.subresourceRange.baseArrayLayer = 0;
-        view_info.subresourceRange.layerCount = 1;
-
-        VK_ASSERT(vkCreateImageView(to_init->device, &view_info, nullptr, &frame_depth_view));
+b32 cleanupDepth(Renderer* renderer) {
+    for (Frame& frame : renderer->frames) {
+        graphicsMemoryFreeImage(&renderer->vram_allocator, &frame.depth_img);
     }
 
     return true;
@@ -525,11 +552,12 @@ b32 initStaging(Renderer* to_init) {
 };
 
 // TODO: Automatic debug mode based on internal / release build.
-b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, Arena* scratch_arena) {
+b32 rendererInitialize(Renderer* to_init, GamePlatformState* platform_state, b32 debug_mode, Arena* static_arena, Arena* scratch_arena) {
     *to_init = {};
 
     ASSERT(initVulkan(to_init, debug_mode, scratch_arena));
-    ASSERT(initSwapchain(to_init, scratch_arena));
+    ASSERT(initSurface(to_init, scratch_arena));
+    ASSERT(initSwapchain(to_init, platform_state->surface_width, platform_state->surface_height));
     ASSERT(initCmdAndSync(to_init));
     ASSERT(initAllocation(to_init, static_arena));
     ASSERT(initDepth(to_init));
@@ -538,6 +566,52 @@ b32 rendererInitialize(Renderer* to_init, b32 debug_mode, Arena* static_arena, A
 
     return true;
 }
+
+b32 rendererResizeSwapchain(Renderer* renderer, GamePlatformState* platform_state) {
+    const i32 current_width = renderer->swapchain_width;
+    const i32 current_height = renderer->swapchain_height;
+
+    i32 new_width = platform_state->surface_width;
+    i32 new_height = platform_state->surface_height;
+
+    if (current_width == new_width && current_height == new_height) {
+        // NOTE: False resize.
+        // This can happen for example on Windows, which sends a
+        // WM_SIZE message when the window is first shown.
+        platform_state->surface_has_been_resized = false;
+        return true;
+    }
+
+    // NOTE: Let's not destroy the swapchain while GPU commands using it
+    // are still in the pipes.
+    vkDeviceWaitIdle(renderer->device);
+
+    // NOTE: This is necessary to prevent validation errors
+    // where vulkan doesn't know the surface max extents have
+    // changed. But we can also use it to check if the platform
+    // hasn't given us wrong values, so it's not too bad.
+    VkSurfaceCapabilitiesKHR surface_caps;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        renderer->physical_device,
+        renderer->surface,
+        &surface_caps
+    );
+
+    // TODO: Logging if there is a mismatch.
+    clamp(new_width, (i32)surface_caps.minImageExtent.width, (i32)surface_caps.maxImageExtent.width);   
+    clamp(new_height, (i32)surface_caps.minImageExtent.height, (i32)surface_caps.maxImageExtent.height);   
+
+    // NOTE: Delete, then re-create the swapchain and depth textures.
+    cleanupSwapchain(renderer);
+    cleanupDepth(renderer);
+
+    initSwapchain(renderer, new_width, new_height);
+    initDepth(renderer);
+
+    platform_state->surface_has_been_resized = false;
+    return true;
+}
+
 
 AllocatedBuffer* rendererRequestStagingBuffer(Renderer* renderer) {
     if(renderer->distributed_staging_buffers >= STAGING_BUFFERS_PER_FRAME) {
@@ -597,7 +671,7 @@ VkShaderModule loadAndCreateShader(Renderer* vk_context, const char* path, Arena
     HANDLE file_handle = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     ASSERT(file_handle != INVALID_HANDLE_VALUE);
 
-    // WARN: This crashes for shader files larger than 4GB...
+    // WARNING: This crashes for shader files larger than 4GB...
     // I think we're safe !
     DWORD file_size_high = 0;
     DWORD file_size = GetFileSize(file_handle, &file_size_high);

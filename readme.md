@@ -51,7 +51,7 @@ Since all the memory the game uses is allocated from the OS by the base executab
 - [x] Keyboard & controller input processing (using the Windows 10+ GameInput lib)
 - [x] Generating `compile_commands.json` inside the build script
 - [ ] Shaders hot-reloading
-- [ ] Swapchain resizing
+- [x] Swapchain resizing
 - [ ] Sound output (WASAPI ?)
 - [ ] Save states (like an emulator)
 - [ ] "Topmost" window mode (useful to keep the window on top of the editor while hot-reloading)
