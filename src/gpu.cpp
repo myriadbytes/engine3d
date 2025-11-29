@@ -440,7 +440,7 @@ b32 initCmdAndSync(Renderer* to_init) {
 
 b32 initAllocation(Renderer* to_init, Arena* static_arena) {
     // NOTE: The largest VRAM allocation we do now are the depth
-    // render targets, which can individually be up to 8MB with a
+    // render targets, which can individually be up to 9MB with a
     // 1920x1080 swapchain. Since the main VRAM allocations now are
     // textures and vertex buffers, maybe it would be better to
     // make two VRAM allocators, one for small allocations (< 4MB)
@@ -448,8 +448,8 @@ b32 initAllocation(Renderer* to_init, Arena* static_arena) {
     // allocator with way too many buddy subdivisions.
     GraphicsMemoryAllocatorConfig large_vram_config = {};
     large_vram_config.memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    large_vram_config.min_alloc_size = KILOBYTES(32);
-    large_vram_config.max_alloc_size = MEGABYTES(8);
+    large_vram_config.min_alloc_size = KILOBYTES(128);
+    large_vram_config.max_alloc_size = MEGABYTES(16);
     large_vram_config.total_size = MEGABYTES(256);
 
     graphicsMemoryAllocatorInitialize(

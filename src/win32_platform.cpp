@@ -21,7 +21,6 @@ using namespace GameInput::v3;
 #include "game_api.h"
 
 global b32 global_running = false;
-global GamePlatformState platform_state = {};
 
 // NOTE: Due to the way Microsoft's GameInput works, we need to keep
 // more state around than what we want to present to the game.
@@ -30,6 +29,20 @@ struct WindowsInputState {
     i64 mouse_accumulated_x;
     i64 mouse_accumulated_y;
 };
+
+// NOTE: We save the previous window position and size when going
+// fullscreen so we can restore them when exiting. This is nicer
+// for the user.
+struct WindowsPlatformState {
+    GamePlatformState to_game;
+    HWND window;
+
+    b32 is_fullscreen;
+    RECT prev_rect;
+    DWORD prev_window_style;
+};
+
+global WindowsPlatformState global_win32_state;
 
 struct TimingInfo {
     i64 timestamp;
@@ -250,6 +263,65 @@ void unloadGameCode(GameCode* game_code) {
     *game_code = {};
 }
 
+// NOTE: For stuff like toggling fullscreen.
+void handlePlatformKeybind(DWORD w_param, DWORD l_param) {
+
+    // NOTE: Do not do anything for key repeats.
+    if (l_param & (1 << 30)) return;
+
+    switch (w_param) {
+        case VK_F11: {
+            // NOTE: Go into "borderless windowed" fullscreen.
+            if (!global_win32_state.is_fullscreen) {
+                // NOTE: Save the window style and rect, in order
+                // to restore them later.
+                global_win32_state.prev_window_style = GetWindowLong(global_win32_state.window, GWL_STYLE);
+                GetWindowRect(global_win32_state.window, &global_win32_state.prev_rect);
+
+                // NOTE: Remove window decorations.
+                SetWindowLong(
+                    global_win32_state.window,
+                    GWL_STYLE,
+                    global_win32_state.prev_window_style & ~WS_OVERLAPPEDWINDOW
+                );
+
+                // NOTE: Get the monitor the window is currently on.
+                HMONITOR hMonitor = MonitorFromWindow(global_win32_state.window, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO mi = { sizeof(mi) };
+                GetMonitorInfo(hMonitor, &mi);
+
+                // NOTE: Resize window to cover the entire monitor.
+                SetWindowPos(
+                    global_win32_state.window,
+                    HWND_TOP,
+                    mi.rcMonitor.left,
+                    mi.rcMonitor.top,
+                    mi.rcMonitor.right - mi.rcMonitor.left,
+                    mi.rcMonitor.bottom - mi.rcMonitor.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+                );
+                
+                global_win32_state.is_fullscreen = true;
+            }
+            // NOTE: Restore to windowed.
+            else {
+                SetWindowLong(global_win32_state.window, GWL_STYLE, global_win32_state.prev_window_style);
+                SetWindowPos(
+                    global_win32_state.window,
+                    NULL,
+                    global_win32_state.prev_rect.left,
+                    global_win32_state.prev_rect.top,
+                    global_win32_state.prev_rect.right - global_win32_state.prev_rect.left,
+                    global_win32_state.prev_rect.bottom - global_win32_state.prev_rect.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED
+                );
+
+                global_win32_state.is_fullscreen = false;
+            }
+        } break;
+    }
+}
+
 // NOTE: The WIN32 callback model is annoying, so the only thing this one does
 // for now is to apply default behavior and call PostQuitMessage in case of WM_DESTROY
 // event. This allows a blocking GetMessage loop to exit gracefully instead of keeping
@@ -266,9 +338,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             i32 new_width = LOWORD(lParam);
             i32 new_height = HIWORD(lParam);
 
-            platform_state.surface_has_been_resized = true;
-            platform_state.surface_width = new_width;
-            platform_state.surface_height = new_height;
+            global_win32_state.to_game.surface_has_been_resized = true;
+            global_win32_state.to_game.surface_width = new_width;
+            global_win32_state.to_game.surface_height = new_height;
 
             return 0;
         } break;
@@ -288,10 +360,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     window_class.lpfnWndProc = WindowProc;
     RegisterClassA(&window_class);
 
-    constexpr i32 DEFAULT_WINDOW_WIDTH = 800;
-    constexpr i32 DEFAULT_WINDOW_HEIGHT = 800;
+    constexpr i32 DEFAULT_WINDOW_WIDTH = 1280;
+    constexpr i32 DEFAULT_WINDOW_HEIGHT = 720;
 
-    HWND window = CreateWindowExA(
+    global_win32_state.window = CreateWindowExA(
         /* behavior */ 0,
         window_class.lpszClassName,
         "WIN32 Window",
@@ -304,7 +376,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         /* userdata ptr */ NULL
     );
 
-    if (window == NULL) {
+    if (global_win32_state.window == NULL) {
         // TODO: logging
         return 1;
     }
@@ -351,16 +423,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 global_running = false;
             }
 
+            if (msg.message == WM_KEYDOWN) {
+                handlePlatformKeybind(msg.wParam, msg.lParam);
+            }
+
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
 
-        pollGameInput(window, microsoft_game_input_interface, previous_input_state, current_input_state);
+        pollGameInput(global_win32_state.window, microsoft_game_input_interface, previous_input_state, current_input_state);
 
         if (game_code.is_valid) {
             // TODO: Compute the actual dt, smoothed over multiple frames to avoid stuttering.
             // SEE: https://x.com/FlohOfWoe/status/1810937083533443251
-            game_code.game_update(1.f/60.f, &platform_state, &game_memory, &current_input_state->input_state);
+            game_code.game_update(1.f/60.f, &global_win32_state.to_game, &game_memory, &current_input_state->input_state);
         }
 
         // NOTE: Swap the user input buffers

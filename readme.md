@@ -38,6 +38,7 @@ You can then run `build/win32_game.exe`.
 - Q/E: Vertical movement
 - LEFT SHIFT: Sprint
 - SPACE: Remove block
+- F11: Toggle fullscreen
 
 ## Game code hot-reloading:
 
