@@ -208,12 +208,13 @@ b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
     instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instance_info.pApplicationInfo = &app_info;
 
-    // FIXME: If the debug mode was enabled but the layers are not present, the
-    // app should not crash and instead should just run without the layers.
     const char* instance_extensions[] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
-    const char* enabled_layers[] = {"VK_LAYER_KHRONOS_validation"};
     instance_info.ppEnabledExtensionNames = instance_extensions;
     instance_info.enabledExtensionCount = ARRAY_COUNT(instance_extensions);
+
+    // NOTE: The validation layers are conditionnaly enabled based on the
+    // debug_mode parameter.
+    const char* enabled_layers[] = {"VK_LAYER_KHRONOS_validation"};
     instance_info.ppEnabledLayerNames = debug_mode ? enabled_layers : nullptr;
     instance_info.enabledLayerCount = debug_mode ? ARRAY_COUNT(enabled_layers) : 0;
 
@@ -298,6 +299,7 @@ b32 initSurface(Renderer* to_init, Arena* scratch_arena) {
             break;
         }
     }
+    USED(found_suitable_format);
     ASSERT(found_suitable_format);
     to_init->surface_format = VK_FORMAT_B8G8R8A8_SRGB;
     to_init->surface_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
@@ -320,6 +322,7 @@ b32 initSurface(Renderer* to_init, Arena* scratch_arena) {
             break;
         }
     }
+    USED(found_suitable_present_mode);
     ASSERT(found_suitable_present_mode);
     to_init->surface_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 
@@ -555,14 +558,14 @@ b32 initStaging(Renderer* to_init) {
 b32 rendererInitialize(Renderer* to_init, GamePlatformState* platform_state, b32 debug_mode, Arena* static_arena, Arena* scratch_arena) {
     *to_init = {};
 
-    ASSERT(initVulkan(to_init, debug_mode, scratch_arena));
-    ASSERT(initSurface(to_init, scratch_arena));
-    ASSERT(initSwapchain(to_init, platform_state->surface_width, platform_state->surface_height));
-    ASSERT(initCmdAndSync(to_init));
-    ASSERT(initAllocation(to_init, static_arena));
-    ASSERT(initDepth(to_init));
-    ASSERT(initDescPool(to_init));
-    ASSERT(initStaging(to_init));
+    initVulkan(to_init, debug_mode, scratch_arena);
+    initSurface(to_init, scratch_arena);
+    initSwapchain(to_init, platform_state->surface_width, platform_state->surface_height);
+    initCmdAndSync(to_init);
+    initAllocation(to_init, static_arena);
+    initDepth(to_init);
+    initDescPool(to_init);
+    initStaging(to_init);
 
     return true;
 }

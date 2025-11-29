@@ -232,7 +232,8 @@ FILETIME getFileLastWriteTime(const char* filename) {
 // unload/reloads.
 void loadPersistentDLLs() {
     static HMODULE vk_dll = LoadLibraryA("vulkan-1.dll");
-    ASSERT(vk_dll != NULL)
+    USED(vk_dll);
+    ASSERT(vk_dll != NULL);
 }
 
 void loadGameCode(GameCode* game_code, const char* src_dll_name) {
@@ -400,6 +401,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     IGameInput* microsoft_game_input_interface;
     HRESULT ginput_create_res = GameInputCreate(&microsoft_game_input_interface);
+    USED(ginput_create_res);
     ASSERT(SUCCEEDED(ginput_create_res));
 
     while (global_running) {

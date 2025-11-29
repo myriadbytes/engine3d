@@ -340,12 +340,18 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
         game_state->frame_arena.base = game_state->frame_arena_memory;
         game_state->frame_arena.capacity = ARRAY_COUNT(game_state->frame_arena_memory);
 
-        ASSERT(rendererInitialize(
+        #if ENGINE_INTERNAL
+        constexpr b32 enable_validation = true;
+        #else
+        constexpr b32 enable_validation = false;
+        #endif
+
+        rendererInitialize(
             &game_state->renderer,
             platform_state,
-            true,
+            enable_validation,
             &game_state->static_arena,
-            &game_state->frame_arena)
+            &game_state->frame_arena
         );
 
         game_state->player_position = {110, 40, 110};
@@ -576,6 +582,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
     // NOTE: Request an image from the swapchain that we can use for rendering.
     u32 swapchain_img_idx;
     VkResult acquire_err = vkAcquireNextImageKHR(game_state->renderer.device, game_state->renderer.swapchain, ONE_SECOND_TIMEOUT, current_frame.swapchain_semaphore, nullptr, &swapchain_img_idx);
+    USED(acquire_err);
     ASSERT(acquire_err == VK_SUCCESS);
 
     // TODO: This needs to be put somewhere else.
@@ -728,7 +735,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
     render_target_info.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     render_target_info.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     render_target_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    render_target_info.clearValue = {.color = {0.01, 0.01, 0.02, 1.0}};
+    render_target_info.clearValue = {.color = {0., 0., 0., 1.0}};
 
     VkRenderingAttachmentInfo depth_target_info = {};
     depth_target_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;

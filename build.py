@@ -7,14 +7,22 @@ exe_name = "win32_game.exe"
 game_dll_name = "game.dll"
 defines = {"ENGINE_SLOW": "1", "ENGINE_INTERNAL": "1"}
 compiler_flags = [
-    "-g",
-    # "-O3",
     "-fdiagnostics-absolute-paths",
     "-Wall",
     "-Wno-missing-braces",
     "-std=c++20",
-    "-DNOMINMAX=1",  # including <Windows.h> name-squats common identifiers if this is not defined
+    "-DNOMINMAX=1",  # Windows.h name-squats common identifiers if this is not defined
 ]
+
+if defines["ENGINE_SLOW"] == "1":
+    print("SLOW BUILD !")
+    compiler_flags.append("-g3")
+    compiler_flags.append("-O0")
+else:
+    print("FAST BUILD !")
+    compiler_flags.append("-g0")
+    compiler_flags.append("-O3")
+
 linker_flags = [
     "-Wl,/LTCG",  # windows linker flag to remove indirection in dll calls, makes debugging easier
 ]

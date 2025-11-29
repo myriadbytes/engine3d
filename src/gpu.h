@@ -8,11 +8,18 @@
 #include "allocators.h"
 #include "game_api.h"
 
-#define VK_ASSERT(statement)       \
-    {                              \
-        VkResult err = statement;  \
-        ASSERT(err == VK_SUCCESS); \
-    }
+#if ENGINE_SLOW
+    #define VK_ASSERT(statement)       \
+        {                              \
+            VkResult err = statement;  \
+            ASSERT(err == VK_SUCCESS); \
+        }
+#else
+    #define VK_ASSERT(statement)       \
+        {                              \
+            statement;                 \
+        }
+#endif
 
 constexpr usize FRAMES_IN_FLIGHT = 2;
 constexpr u64 ONE_SECOND_TIMEOUT = 1'000'000'000;
