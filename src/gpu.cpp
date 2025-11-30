@@ -253,9 +253,14 @@ b32 initVulkan(Renderer* to_init, b32 debug_mode, Arena* scratch_arena) {
     vk_1_3_features.synchronization2 = VK_TRUE;
     vk_1_3_features.dynamicRendering = VK_TRUE;
 
+    VkPhysicalDeviceFeatures2 phys_device_features = {};
+    phys_device_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    phys_device_features.features.fillModeNonSolid = VK_TRUE;
+    phys_device_features.pNext = &vk_1_3_features;
+
     VkDeviceCreateInfo device_info = {};
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    device_info.pNext = &vk_1_3_features;
+    device_info.pNext = &phys_device_features;
     device_info.pQueueCreateInfos = &queue_info;
     device_info.queueCreateInfoCount = 1;
     device_info.ppEnabledExtensionNames = device_extensions;
@@ -823,6 +828,10 @@ void pipelineBuilderEnableDepth(VulkanPipelineBuilder* builder) {
     builder->depth_stencil_info.depthTestEnable = VK_TRUE;
     builder->depth_stencil_info.depthWriteEnable = VK_TRUE;
     builder->depth_stencil_info.depthCompareOp = VK_COMPARE_OP_LESS;
+}
+
+void pipelineBuilderEnableWireframe(VulkanPipelineBuilder* builder) {
+    builder->raster_info.polygonMode = VK_POLYGON_MODE_LINE;    
 }
 
 void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder) {

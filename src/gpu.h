@@ -193,6 +193,7 @@ void pipelineBuilderSetFragmentShader(VulkanPipelineBuilder* builder, VkShaderMo
 void pipelineBuilderEnableAlphaBlending(VulkanPipelineBuilder* builder);
 void pipelineBuilderEnableBackfaceCulling(VulkanPipelineBuilder* builder);
 void pipelineBuilderEnableDepth(VulkanPipelineBuilder* builder);
+void pipelineBuilderEnableWireframe(VulkanPipelineBuilder* builder);
 
 void pipelineBuilderAddImageSampler(VulkanPipelineBuilder* builder);
 void pipelineBuilderAddUniformBuffer(VulkanPipelineBuilder* builder, VkShaderStageFlags stage);

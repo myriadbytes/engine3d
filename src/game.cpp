@@ -292,6 +292,38 @@ void chunkPipelineInitialize(Renderer* renderer, VulkanPipeline* to_create, Aren
     vkDestroyShaderModule(renderer->device, chunk_frag_shader, nullptr);
 }
 
+void wireframePipelineInitialize(Renderer* renderer, VulkanPipeline* to_create, Arena* scratch_arena) {
+    VkShaderModule wireframe_vert_shader = loadAndCreateShader(renderer, "./shaders/wireframe.vert.spv", scratch_arena);
+    VkShaderModule wireframe_frag_shader = loadAndCreateShader(renderer, "./shaders/wireframe.frag.spv", scratch_arena);
+
+    VulkanPipelineBuilder builder = {};
+    pipelineBuilderInitialize(&builder);
+
+    pipelineBuilderSetVertexShader(&builder, wireframe_vert_shader);
+    pipelineBuilderSetFragmentShader(&builder, wireframe_frag_shader);
+    // pipelineBuilderEnableBackfaceCulling(&builder);
+    pipelineBuilderEnableDepth(&builder);
+    pipelineBuilderEnableWireframe(&builder);
+
+    // NOTE: Add a vertex buffer and two vec3 for position and normals.
+    pipelineBuilderAddVertexInputBinding(&builder, sizeof(ChunkVertex));
+    pipelineBuilderAddVertexAttribute(&builder, VK_FORMAT_R32G32B32_SFLOAT, 0);
+    pipelineBuilderAddVertexAttribute(&builder, VK_FORMAT_R32G32B32_SFLOAT, sizeof(v3));
+
+    // NOTE: Two uniform buffers for the view and proj matrices.
+    // The model matrix is handled with a push constant so we don't have
+    // to have too much descriptor set updating.
+    pipelineBuilderAddUniformBuffer(&builder, VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddUniformBuffer(&builder, VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddPushConstant(&builder, sizeof(m4), VK_SHADER_STAGE_VERTEX_BIT);
+    pipelineBuilderAddPushConstant(&builder, sizeof(v4), VK_SHADER_STAGE_VERTEX_BIT);
+
+    pipelineBuilderCreatePipeline(&builder, renderer->device, to_create);
+
+    vkDestroyShaderModule(renderer->device, wireframe_vert_shader, nullptr);
+    vkDestroyShaderModule(renderer->device, wireframe_frag_shader, nullptr);
+}
+
 struct GameState {
     f32 time;
     RandomSeries random_series;
@@ -309,7 +341,7 @@ struct GameState {
     Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
 
     VulkanPipeline chunk_render_pipeline;
-    // VulkanPipeline wireframe_render_pipeline;
+    VulkanPipeline wireframe_render_pipeline;
 
     AllocatedBuffer view_matrix_uniforms[FRAMES_IN_FLIGHT];
     AllocatedBuffer projection_matrix_uniforms[FRAMES_IN_FLIGHT];
@@ -363,6 +395,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
         simplex_table_from_seed(&game_state->simplex_table, 0xC0FFEE);
 
         chunkPipelineInitialize(&game_state->renderer, &game_state->chunk_render_pipeline, &game_state->frame_arena);
+        wireframePipelineInitialize(&game_state->renderer, &game_state->wireframe_render_pipeline, &game_state->frame_arena);
 
         // NOTE: For each frame, create 2 uniforms the view and projection matrices.
         // Also create a descriptor set that will point to that frame's uniforms.
@@ -407,15 +440,6 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
 
         hashmapInitialize(&game_state->world_hashmap, chunkPositionHash);
         poolInitialize(&game_state->chunk_pool);
-
-        BuddyAllocator test_allocator;
-        buddyInitalize(
-            &test_allocator,
-            &game_state->frame_arena,
-            256,
-            KILOBYTES(1),
-            KILOBYTES(2)
-        );
 
         memory->is_initialized = true;
     }
@@ -789,18 +813,33 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
     *projection_mat = makeProjection(0.1, 1000, 90, aspect_ratio);
 
     // NOTE: Bind the pipeline and the descriptor set for the frame-constant matrices.
-    vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
+    if (game_state->is_wireframe) {
+        vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->wireframe_render_pipeline.pipeline);
 
-    vkCmdBindDescriptorSets(
-        current_frame.cmd_buffer,
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        game_state->chunk_render_pipeline.layout,
-        0,
-        1,
-        &game_state->matrices_desc_sets[swapchain_img_idx],
-        0,
-        nullptr
-    );
+        vkCmdBindDescriptorSets(
+            current_frame.cmd_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            game_state->wireframe_render_pipeline.layout,
+            0,
+            1,
+            &game_state->matrices_desc_sets[swapchain_img_idx],
+            0,
+            nullptr
+        );
+    } else {
+        vkCmdBindPipeline(current_frame.cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, game_state->chunk_render_pipeline.pipeline);
+
+        vkCmdBindDescriptorSets(
+            current_frame.cmd_buffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            game_state->chunk_render_pipeline.layout,
+            0,
+            1,
+            &game_state->matrices_desc_sets[swapchain_img_idx],
+            0,
+            nullptr
+        );
+    }
 
     // NOTE: Draw the chunks !
 
@@ -824,15 +863,32 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
 
         ASSERT(chunk->vertex_buffer.buffer != nullptr);
 
-        m4 model_mat = makeTranslation(chunkToWorldPos(chunk->chunk_position));
-        vkCmdPushConstants(
-            current_frame.cmd_buffer,
-            game_state->chunk_render_pipeline.layout,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            0,
-            sizeof(m4),
-            &model_mat
-        );
+        // NOTE: Create the push constants buffer. We put the model matrix,
+        // and the color for the wireframe after.
+        f32 push_constants[sizeof(m4) + sizeof(v4)];
+        *((m4*)(push_constants)) = makeTranslation(chunkToWorldPos(chunk->chunk_position));
+        *((v4*)(push_constants + 16)) = {1, 1, 1, 1}; 
+
+        if (game_state->is_wireframe) {
+            vkCmdPushConstants(
+                current_frame.cmd_buffer,
+                game_state->wireframe_render_pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(m4) + sizeof(v4),
+                push_constants
+            );
+        }
+        else {
+            vkCmdPushConstants(
+                current_frame.cmd_buffer,
+                game_state->chunk_render_pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(m4),
+                push_constants
+            );
+        }
 
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(current_frame.cmd_buffer, 0, 1, &chunk->vertex_buffer.buffer, &offset);
