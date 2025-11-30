@@ -337,7 +337,7 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    Hashmap<Chunk, v3i, WORLD_HASHMAP_SIZE> world_hashmap;
+    Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE> world_hashmap;
     Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
 
     VulkanPipeline chunk_render_pipeline;
@@ -576,7 +576,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
                         height_intensity /= 3.f;
                     }
 
-                    if (block_y <= height && block_y >= -10) {
+                    if (block_y <= height) {
                         new_chunk->data[block_idx] = 1;
                     } else {
                         // TODO: We cleared the whole chunk
@@ -586,6 +586,34 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
                         // it has or has not been cleared ?
                         // new_chunk->data[block_idx] = 0;
                     }
+                }
+
+                // NOTE: When adding a chunk, all it's neighbors already in the
+                // world need remeshing since no block faces are created at the
+                // boundary with not-yet-loaded chunks.
+                Chunk* pos_x_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos + v3i {1, 0, 0});
+                if (pos_x_neighbor) {
+                    pos_x_neighbor->needs_remeshing = true;
+                }
+                Chunk* neg_x_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos - v3i {1, 0, 0});
+                if (neg_x_neighbor) {
+                    neg_x_neighbor->needs_remeshing = true;
+                }
+                Chunk* pos_y_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos + v3i {0, 1, 0});
+                if (pos_y_neighbor) {
+                    pos_y_neighbor->needs_remeshing = true;
+                }
+                Chunk* neg_y_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos - v3i {0, 1, 0});
+                if (neg_y_neighbor) {
+                    neg_y_neighbor->needs_remeshing = true;
+                }
+                Chunk* pos_z_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos + v3i {0, 0, 1});
+                if (pos_z_neighbor) {
+                    pos_z_neighbor->needs_remeshing = true;
+                }
+                Chunk* neg_z_neighbor = hashmapGet(&game_state->world_hashmap, chunk_to_load_pos - v3i {0, 0, 1});
+                if (neg_z_neighbor) {
+                    neg_z_neighbor->needs_remeshing = true;
                 }
             }
         }
@@ -658,6 +686,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
 
         usize generated_vertices;
         generateNaiveChunkMesh(
+            &game_state->world_hashmap,
             chunk,
             (ChunkVertex*)staging_buffer->alloc.mapped_data,
             &generated_vertices

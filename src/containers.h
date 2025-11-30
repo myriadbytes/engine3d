@@ -9,7 +9,7 @@ struct HashmapEntry {
     usize hash;
 
     K key;
-    V* value;
+    V value;
 
     b32 is_occupied;
     usize home_distance;
@@ -28,7 +28,7 @@ void hashmapInitialize(Hashmap<V, K, N>* hashmap, usize (*hashingFunction)(K)) {
 }
 
 template <typename V, typename K, usize N>
-void hashmapInsert(Hashmap<V, K, N>* hashmap, K key, V* value) {
+void hashmapInsert(Hashmap<V, K, N>* hashmap, K key, V value) {
     // NOTE: The strategy used here is called "robin-hood" hashing.
 
     ASSERT(!hashmapContains(hashmap, key));
@@ -160,4 +160,42 @@ b32 hashmapContains(Hashmap<V, K, N>* hashmap, K key) {
     }
    
     return false;
+}
+
+template <typename V, typename K, usize N>
+V hashmapGet(Hashmap<V, K, N>* hashmap, K key) {
+    usize hash = hashmap->hashingFunction(key);
+    usize idx = hash % N;
+    u32 lookup_home_dist = 0;
+
+    V default_value = {};
+
+    while (true) {
+        HashmapEntry<V, K>* iter_entry = &hashmap->entries[idx];
+
+        // NOTE: We have iterated on the whole cluster, arrived at
+        // an empty cell, and didn't find the entry.
+        if (!iter_entry->is_occupied) {
+            return default_value;
+        };
+
+        // NOTE: A nice property of Robin-Hood hashing is that we
+        // know that a possible new entry would have displaced others
+        // if its home distance gets greater. So if we arrive at this
+        // case we know that the entry was never inserted.
+        if (lookup_home_dist > iter_entry->home_distance) {
+            return default_value;
+        };
+
+        // NOTE: WE found the it ! Yay !
+        if (iter_entry->key == key) {
+            return iter_entry->value;
+        }
+
+        // NOTE: Keep looking forward.
+        idx = (idx + 1) % N;
+        lookup_home_dist++;
+    }
+   
+    return default_value;
 }

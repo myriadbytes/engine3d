@@ -5,6 +5,7 @@
 #include "common.h"
 #include "maths.h"
 #include "gpu.h"
+#include "containers.h"
 
 constexpr i32 CHUNK_W = 16;
 
@@ -100,4 +101,4 @@ constexpr usize chunkPositionHash(v3i chunk_position) {
 }
 
 // TODO: Look into switching to greedy meshing.
-void generateNaiveChunkMesh(Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);
+void generateNaiveChunkMesh(Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE>* world_hashmap, Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);
