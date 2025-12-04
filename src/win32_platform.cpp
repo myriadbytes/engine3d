@@ -42,6 +42,8 @@ struct WindowsPlatformState {
     DWORD prev_window_style;
 
     b32 is_topmost;
+
+    DWORD refresh_rate;
 };
 
 global WindowsPlatformState global_win32_state;
@@ -322,6 +324,7 @@ void handlePlatformKeybind(DWORD w_param, DWORD l_param) {
                 global_win32_state.is_fullscreen = false;
             }
         } break;
+        #if ENGINE_INTERNAL
         case VK_F8: {
             if (global_win32_state.is_fullscreen) return; 
 
@@ -343,6 +346,7 @@ void handlePlatformKeybind(DWORD w_param, DWORD l_param) {
                 global_win32_state.is_topmost = false;
             }
         } break;
+        #endif
     }
 }
 
@@ -427,6 +431,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     USED(ginput_create_res);
     ASSERT(SUCCEEDED(ginput_create_res));
 
+    // TODO: What if the user drags the window from a 60Hz screen to a 144Hz screen ?
+    // This should be handled. Currently we use VSync for timing, so the game would just
+    // run twice as fast.
+    HMONITOR mon = MonitorFromWindow(global_win32_state.window, MONITOR_DEFAULTTONEAREST);
+
+    MONITORINFOEX monitor_info = {};
+    monitor_info.cbSize = sizeof(monitor_info);
+    GetMonitorInfoA(mon, &monitor_info);
+
+    DEVMODEA devmode = {};
+    devmode.dmSize = sizeof(devmode);
+    EnumDisplaySettingsA(monitor_info.szDevice, ENUM_CURRENT_SETTINGS, &devmode);
+
+    global_win32_state.refresh_rate = devmode.dmDisplayFrequency;
+
     while (global_running) {
 
         // NOTE: measure and print the time the previous frame took
@@ -461,7 +480,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         if (game_code.is_valid) {
             // TODO: Compute the actual dt, smoothed over multiple frames to avoid stuttering.
             // SEE: https://x.com/FlohOfWoe/status/1810937083533443251
-            game_code.game_update(1.f/60.f, &global_win32_state.to_game, &game_memory, &current_input_state->input_state);
+            game_code.game_update(1.f / (f32)global_win32_state.refresh_rate, &global_win32_state.to_game, &game_memory, &current_input_state->input_state);
         }
 
         // NOTE: Swap the user input buffers
