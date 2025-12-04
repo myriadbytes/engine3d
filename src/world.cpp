@@ -3,7 +3,7 @@
 // TODO: Many duplicate vertices. Is it easy/possible to use indices here ?
 // TODO: Currently the chunk doesn't look into neighboring chunks. This means there are generated
 // triangles between solid blocks on two different chunks.
-void generateNaiveChunkMesh(Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE>* world_hashmap, Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count) {
+void generateNaiveChunkMesh(WorldHashmap* world_hashmap, Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count) {
     usize emitted = 0;
     for(usize i = 0; i < CHUNK_W * CHUNK_W * CHUNK_W; i++){
 

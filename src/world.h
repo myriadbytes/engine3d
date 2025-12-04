@@ -100,5 +100,7 @@ constexpr usize chunkPositionHash(v3i chunk_position) {
     return hash;
 }
 
+using WorldHashmap = Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE, chunkPositionHash>;
+
 // TODO: Look into switching to greedy meshing.
-void generateNaiveChunkMesh(Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE>* world_hashmap, Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);
+void generateNaiveChunkMesh(WorldHashmap* world_hashmap, Chunk* chunk, ChunkVertex* out_vertices, usize* out_generated_vertex_count);

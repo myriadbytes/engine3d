@@ -15,25 +15,19 @@ struct HashmapEntry {
     usize home_distance;
 };
 
-template <typename V, typename K, usize N>
+template <typename V, typename K, usize N, usize(*H)(K)>
 struct Hashmap {
     HashmapEntry<V, K> entries[N];
-    usize (*hashingFunction)(K);
     usize nb_occupied;
 };
 
-template <typename V, typename K, usize N>
-void hashmapInitialize(Hashmap<V, K, N>* hashmap, usize (*hashingFunction)(K)) {
-    hashmap->hashingFunction = hashingFunction;
-}
-
-template <typename V, typename K, usize N>
-void hashmapInsert(Hashmap<V, K, N>* hashmap, K key, V value) {
+template <typename V, typename K, usize N, usize(*H)(K)>
+void hashmapInsert(Hashmap<V, K, N, H>* hashmap, K key, V value) {
     // NOTE: The strategy used here is called "robin-hood" hashing.
 
     ASSERT(!hashmapContains(hashmap, key));
 
-    usize hash = hashmap->hashingFunction(key);
+    usize hash = H(key);
     usize idx = hash % N;
 
     HashmapEntry<V, K> to_insert_entry = {};
@@ -69,12 +63,12 @@ void hashmapInsert(Hashmap<V, K, N>* hashmap, K key, V value) {
     }
 }
 
-template <typename V, typename K, usize N>
-void hashmapRemove(Hashmap<V, K, N>* hashmap, K key) {
+template <typename V, typename K, usize N, usize(*H)(K)>
+void hashmapRemove(Hashmap<V, K, N, H>* hashmap, K key) {
     // NOTE: The strategy used here is called "backward-shift deletion" and
     // is common with robin-hood hashing.
 
-    usize hash = hashmap->hashingFunction(key);
+    usize hash = H(key);
     usize idx = hash % N;
     u32 lookup_home_dist = 0;
 
@@ -126,9 +120,9 @@ void hashmapRemove(Hashmap<V, K, N>* hashmap, K key) {
     }
 }
 
-template <typename V, typename K, usize N>
-b32 hashmapContains(Hashmap<V, K, N>* hashmap, K key) {
-    usize hash = hashmap->hashingFunction(key);
+template <typename V, typename K, usize N, usize(*H)(K)>
+b32 hashmapContains(Hashmap<V, K, N, H>* hashmap, K key) {
+    usize hash = H(key);
     usize idx = hash % N;
     u32 lookup_home_dist = 0;
 
@@ -162,9 +156,9 @@ b32 hashmapContains(Hashmap<V, K, N>* hashmap, K key) {
     return false;
 }
 
-template <typename V, typename K, usize N>
-V hashmapGet(Hashmap<V, K, N>* hashmap, K key) {
-    usize hash = hashmap->hashingFunction(key);
+template <typename V, typename K, usize N, usize(*H)(K)>
+V hashmapGet(Hashmap<V, K, N, H>* hashmap, K key) {
+    usize hash = H(key);
     usize idx = hash % N;
     u32 lookup_home_dist = 0;
 

@@ -337,7 +337,7 @@ struct GameState {
     v3 camera_forward;
     b32 orbit_mode;
 
-    Hashmap<Chunk*, v3i, WORLD_HASHMAP_SIZE> world_hashmap;
+    WorldHashmap world_hashmap;
     Pool<Chunk, CHUNK_POOL_SIZE> chunk_pool;
 
     VulkanPipeline chunk_render_pipeline;
@@ -438,7 +438,6 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
             vkUpdateDescriptorSets(game_state->renderer.device, ARRAY_COUNT(set_writes), set_writes, 0, nullptr);
         }
 
-        hashmapInitialize(&game_state->world_hashmap, chunkPositionHash);
         poolInitialize(&game_state->chunk_pool);
 
         memory->is_initialized = true;
@@ -465,7 +464,7 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
 
     v3 camera_right = normalize(cross(game_state->camera_forward, {0, 1, 0}));
 
-    f32 speed = 20 * dt;
+    f32 speed = 100 * dt;
     if (input->kb.keys[SCANCODE_LSHIFT].is_down || input->ctrl.x.is_down) {
         speed *= 5;
     }
