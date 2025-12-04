@@ -40,6 +40,8 @@ struct WindowsPlatformState {
     b32 is_fullscreen;
     RECT prev_rect;
     DWORD prev_window_style;
+
+    b32 is_topmost;
 };
 
 global WindowsPlatformState global_win32_state;
@@ -318,6 +320,27 @@ void handlePlatformKeybind(DWORD w_param, DWORD l_param) {
                 );
 
                 global_win32_state.is_fullscreen = false;
+            }
+        } break;
+        case VK_F8: {
+            if (global_win32_state.is_fullscreen) return; 
+
+            if (!global_win32_state.is_topmost) {
+                SetWindowPos(
+                    global_win32_state.window,
+                    HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE
+                );
+                global_win32_state.is_topmost = true;
+            } else {
+                SetWindowPos(
+                    global_win32_state.window,
+                    HWND_NOTOPMOST,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE
+                );
+                global_win32_state.is_topmost = false;
             }
         } break;
     }
