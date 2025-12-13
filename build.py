@@ -51,6 +51,7 @@ game_source_files = [
     "src/world.cpp",
     "src/img.cpp",
     "src/gpu.cpp",
+    "src/str.cpp"
 ]
 common_source_files = []
 

@@ -193,3 +193,32 @@ V hashmapGet(Hashmap<V, K, N, H>* hashmap, K key) {
    
     return default_value;
 }
+
+// STACK
+
+template <typename T, usize N>
+struct SStack {
+    T data[N];
+    usize top;
+
+    SStack() : top(0) {}
+
+    b32 is_empty() {
+        return top == 0;
+    }
+
+    void push(const T& element) {
+        ASSERT(top < N);
+        if (top == N) return;
+
+        data[top] = element;
+        top++;
+    }
+
+    T pop() {
+        ASSERT(top > 0);
+
+        top--;
+        return data[top];
+    }
+};

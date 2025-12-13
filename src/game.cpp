@@ -11,6 +11,7 @@
 #include "noise.h"
 #include "gpu.h"
 #include "world.h"
+#include "str.h"
 
 struct TextRenderingState {
     b32 is_initialized;
@@ -195,7 +196,7 @@ struct TextShaderPushConstants {
 
 // TODO: Switch away from null-terminated strings.
 // NOTE: The debug text is drawn on a terminal-like grid, using a monospace font.
-void drawDebugTextOnScreen(Renderer* renderer, TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, const char* text, u32 start_col, u32 start_row) {
+void drawDebugTextOnScreen(Renderer* renderer, TextRenderingState* text_rendering_state, VkCommandBuffer cmd_buf, StrView text, u32 start_col, u32 start_row) {
 
     // NOTE: Set up the pipeline.
     vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, text_rendering_state->text_pipeline.pipeline);
@@ -230,7 +231,7 @@ void drawDebugTextOnScreen(Renderer* renderer, TextRenderingState* text_renderin
     f32 char_width = char_scale * 2 * char_ratio;
     f32 char_height = char_scale * 2 * aspect_ratio;
 
-    // NOTE: The shader produce a quad that covers the whole screen.
+    // NOTE: The shader produces a quad that covers the whole screen.
     // We need to make it a quad of the right proportions and
     // located in the top left slot.
     m4 quad_setup_matrix =
@@ -239,7 +240,7 @@ void drawDebugTextOnScreen(Renderer* renderer, TextRenderingState* text_renderin
 
     i32 col = start_col;
     i32 row = start_row;
-    for (int char_i = 0; text[char_i] != 0; char_i++) {
+    for (int char_i = 0; char_i < text.len; char_i++) {
         u32 char_ascii_codepoint = (u32)text[char_i];
         if (char_ascii_codepoint == '\n') {
             col = start_col;
@@ -925,12 +926,16 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
     }
 
     // NOTE: Text rendering test.
-    char debug_text_string[256];
+    
+    Slice<u8> debug_text_buffer = Slice<u8>((u8*)pushBytes(&game_state->frame_arena, 512), 512);
+
     v3i chunk_position = worldPosToChunk(game_state->player_position);
-    StringCbPrintfA(
-        debug_text_string,
-        ARRAY_COUNT(debug_text_string),
-        "Pos: %.2f, %.2f, %.2f\nChunk: %d, %d, %d\nHashmap: %d/%d\nPool: %d/%d",
+    StrView debug_text_view = formatString(
+        debug_text_buffer,
+        "Pos: {f32}, {f32}, {f32}\n"
+        "Chunk: {i32}, {i32}, {i32}\n"
+        "Hashmap: {u64}/{u64}\n"
+        "Pool: {u64}/{u64}",
         game_state->player_position.x(),
         game_state->player_position.y(),
         game_state->player_position.z(),
@@ -946,28 +951,27 @@ void gameUpdate(f32 dt, GamePlatformState* platform_state, GameMemory* memory, I
         &game_state->renderer,
         &game_state->text_rendering_state,
         current_frame.cmd_buffer,
-        debug_text_string,
-        0, 0
+        debug_text_view,
+        0,
+        0
     );
 
-    char debug_vram_usage_string[256];
+    Slice<u8> debug_vram_usage_buffer = Slice<u8>((u8*)pushBytes(&game_state->frame_arena, 512), 512);
     usize vram_usage = buddyMeasure(&game_state->renderer.vram_allocator.allocator);
-    ASSERT(vram_usage >= MEGABYTES(1));
-    vram_usage /= MEGABYTES(1);
 
-    StringCbPrintfA(
-        debug_vram_usage_string,
-        ARRAY_COUNT(debug_vram_usage_string),
-        "VRAM Usage:\n%llu / %llu MB",
+    StrView debug_vram_usage_view = formatString(
+        debug_vram_usage_buffer,
+        "VRAM Usage:\n{size} / {size}",
         vram_usage,
-        game_state->renderer.vram_allocator.allocator.total_size / MEGABYTES(1)
+        game_state->renderer.vram_allocator.allocator.total_size
     );
     drawDebugTextOnScreen(
         &game_state->renderer,
         &game_state->text_rendering_state,
         current_frame.cmd_buffer,
-        debug_vram_usage_string,
-        0, 5
+        debug_vram_usage_view,
+        0,
+        5
     );
 
     vkCmdEndRendering(current_frame.cmd_buffer);

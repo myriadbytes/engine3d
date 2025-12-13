@@ -388,7 +388,7 @@ u8* read_image(const char* path, u32* w, u32* h, Arena* return_arena, Arena* scr
     u32 image_width;
     u32 image_height;
 
-    OutputDebugStringA("PNG Chunks:\n");
+    // OutputDebugStringA("PNG Chunks:\n");
 
     // NOTE: Loop through all chunks starting after the header.
     u32 at = PNG_HEADER_SIZE;
@@ -400,8 +400,8 @@ u8* read_image(const char* path, u32* w, u32* h, Arena* return_arena, Arena* scr
         u32 chunk_contents_size = endian_swap(chunk_header->length);
         at += sizeof(PngChunkHeader);
 
-        StringCbPrintfA(printf_buffer, 256, "    %.4s (%u bytes)\n", chunk_header->type_chars, chunk_contents_size);
-        OutputDebugStringA(printf_buffer);
+        // StringCbPrintfA(printf_buffer, 256, "    %.4s (%u bytes)\n", chunk_header->type_chars, chunk_contents_size);
+        // OutputDebugStringA(printf_buffer);
 
         switch(chunk_header->type_nb) {
             case four_cc("IHDR"): {
