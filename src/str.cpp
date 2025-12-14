@@ -102,6 +102,7 @@ void outputSize(Slice<u8>& output, usize n) {
 // It trades some features (i.e. unlimited decimal places, custom formatting)
 // for simplicity and speed. This version is even simpler, since it only prints
 // up to 2 decimal places.
+// TODO: The number of digits after the comma should be configurable.
 void outputFloat(Slice<u8>& output, f64 x) {
     // NOTE: The algorithm works by splitting the number into 4 parts,
     // like scientific notation :
@@ -113,6 +114,9 @@ void outputFloat(Slice<u8>& output, f64 x) {
     // happening in case one of the parts exceeds this limit. For example, if
     // the  integral part is bigger than 4 billions, we would divide it by 10
     // and increase the exponent part.
+
+    constexpr u32 DIGITS_AFTER_COMMA = 2;
+    constexpr f64 DECIMAL_PART_POW = 1e2;
 
     // NOTE: Handle negative numbers, NaN, etc.
     // TODO: NaN and Inf.
@@ -136,7 +140,7 @@ void outputFloat(Slice<u8>& output, f64 x) {
 
     u32 integral_part = (u32) x;
     f64 remainder = x - (f64) integral_part;
-    u32 decimal_part = (u32) (remainder * 1e2);
+    u32 decimal_part = (u32) (remainder * DECIMAL_PART_POW);
 
     // NOTE: Round the decimal part.
     if (remainder * 1e2 - (f64)decimal_part > 0.5f) {
@@ -155,9 +159,22 @@ void outputFloat(Slice<u8>& output, f64 x) {
     // NOTE: Print each part, one after the other.
     outputInteger(output, integral_part);
     if (decimal_part) {
-        // FIXME: This prints "16.2" when trying to print the number "16.02".
+        // NOTE: We can't just call outputInteger for the decimal part, because
+        // the logic is a little different. We want to output exactly
+        // DIGITS_AFTER_COMMA characters, and add zeroes if necessary. Otherwise
+        // with two digits after the comma and a decimal part of 2, we would get
+        // "16.2" instead of the correct "16.02".
         outputChar(output, '.');
-        outputInteger(output, decimal_part);
+
+        SStack<u8, 32> decimal_digits;
+        for (i32 remaining = DIGITS_AFTER_COMMA; remaining > 0; remaining--) {
+            decimal_digits.push('0' + decimal_part % 10);         
+            decimal_part /= 10;
+        }
+
+        while (!decimal_digits.is_empty()) {
+            outputChar(output, decimal_digits.pop());
+        }
     }
     if (exponent) {
         outputChar(output, 'e');
